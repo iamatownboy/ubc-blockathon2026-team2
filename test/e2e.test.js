@@ -335,9 +335,31 @@ test("12b. the admin cannot substitute a product code on an approved item", asyn
 
 test("12c. API responses carry browser security headers", async () => {
   const res = await call("/api/catalog");
-  assert.match(res.headers.get("content-security-policy"), /frame-ancestors 'none'/);
+  const csp = res.headers.get("content-security-policy");
+  // 'self', not 'none': the demo stage frames the learner app from this same
+  // origin. Anything outside the origin still cannot frame it, and that is
+  // what the header has to keep guaranteeing.
+  assert.match(csp, /frame-ancestors 'self'/);
+  assert.doesNotMatch(csp, /frame-ancestors [^;]*\*/);
+  assert.match(csp, /default-src 'self'/);
+  assert.match(csp, /object-src 'none'/);
   assert.equal(res.headers.get("x-content-type-options"), "nosniff");
-  assert.equal(res.headers.get("x-frame-options"), "DENY");
+  assert.equal(res.headers.get("x-frame-options"), "SAMEORIGIN");
+});
+
+test("12c2. the demo stage is served and asks for no token", async () => {
+  const page = await fetch(base + "/demo/");
+  const html = await page.text();
+  assert.equal(page.status, 200);
+  assert.match(html, /demo\/app\.js/);
+  const script = await (await fetch(base + "/demo/app.js")).text();
+  // The projected screen must not carry an admin secret: it may read only the
+  // two endpoints that need none.
+  assert.doesNotMatch(script, /x-role-token|adminToken|verifierToken/);
+  for (const path of ["/api/stats", "/api/events", "/api/enrollment"]) {
+    assert.equal((await fetch(base + path)).status, 200, `${path} must be readable with no token`);
+  }
+  assert.equal((await fetch(base + "/api/admin/log")).status, 401);
 });
 
 test("12d. abandoned review text expires and is removed", async () => {

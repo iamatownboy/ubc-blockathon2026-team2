@@ -30,6 +30,7 @@ crosses a network boundary) and the service on **:8787**:
 | Learner app | http://localhost:8787/learner/ | 430px. No account, no e-mail, no wallet software, no gas. A partner-issued participation code (demo: `WELCOME-01` … `WELCOME-12`, printed at startup) opens the session; the device generates its own ECDH keypair (`extractable: false`) in IndexedDB to receive cards. EN / 한국어 / 中文. |
 | Verifier console | http://localhost:8787/verifier/ | The review queue. Approving awards the mission's configured amount — there is **no field to type an amount into**. Token: `verifier-demo` |
 | Admin console | http://localhost:8787/admin/ | Missions, catalog, pause, live ledger events, service log — and the provider failure switches. Token: `admin-demo` |
+| Demo stage | http://localhost:8787/demo/ | For a judging laptop: the learner phone at full size with the live ledger, catalog stock and the conservation check beside it. Reads only the two token-free endpoints, so the projected screen carries no admin secret. |
 | Public stats | http://localhost:8787/api/stats | Readable by anyone, no login. Aggregate only. |
 
 Requires Node ≥ 20 (`. ~/.nvm/nvm.sh` on this machine).
@@ -106,7 +107,8 @@ change.
 ## Tests
 
 ```bash
-npm test                          # 28 ledger + 35 end-to-end, under 10 s, no toolchain
+npm test                          # 28 ledger + 36 end-to-end + 1 parity, under 10 s, no toolchain
+npm run test:parity               # the parity suite alone (needs a running chain)
 cd contracts && npx hardhat test  # 23 Solidity tests (needs the network once, for npm install)
 cd contracts && SOLC_JS=1 npx hardhat test   # same 23, offline: uses the solcjs in node_modules
 ```
@@ -123,7 +125,24 @@ credits and stock exactly; expiry, sweeping, and the clock extending; pause
 blocking earning while still allowing refunds; and conservation — awarded
 equals outstanding plus in-swap plus swapped plus expired.
 
-**End to end, 35 tests.** A session refused without a partner-issued code and
+**Parity, 1 test — the one that keeps the two implementations honest.** The
+contract and the JavaScript mirror are two implementations of the same rules,
+and two implementations drift. `test/parity.test.js` drives one identical
+script — award, duplicate, swap, settle, short balance, cancel, spend the
+refund, wrong key — through both and compares the whole transcript step by
+step: balance, lifetime total, stock, swap status, the five conservation
+totals and the revert name. It skips (loudly, with the reason) when no chain
+is running, so `npm test` still works on a bare laptop.
+
+It earned itself immediately. `ChainLedger` wraps each role key in an ethers
+`NonceManager`, which counts optimistically — so an *expected* revert (a
+learner repeating a mission, a swap short of credits) burned a local nonce and
+every later call from that key failed with "Nonce too high". One duplicate
+submission would have stopped the verifier key awarding anything for the rest
+of an on-chain demo. Fixed, and the parity run now passes against a live
+Hardhat chain.
+
+**End to end, 36 tests.** A session refused without a partner-issued code and
 a wiped browser landing back on the same handle, balance and lifetime cap; the
 code never appearing in the store; the coach filter stripping `pass` and `credits`; a
 tampered submission awarding nothing; grading and the review queue; the
@@ -152,8 +171,9 @@ server/
   store.js         minimal off-chain state, review TTL, atomic sealed-swap persistence
   enrollment.js    partner-issued participation codes → one stable handle per person
   ids.js           bytes32 helpers, random handles
-public/learner · public/admin · public/verifier
-test/ledger.test.js · test/e2e.test.js
+public/learner · public/admin · public/verifier · public/demo (the stage)
+test/ledger.test.js · test/e2e.test.js · test/parity.test.js
+make-submission.sh                        git archive → a clean source-only bundle
 (the earlier Next.js prototype in web/ is superseded and not committed)
 ```
 
@@ -227,5 +247,7 @@ Arm **error** or **timeout** instead and watch the refund land.
 - Passed and failed submissions retain structured audit results, not learner-written text. A near miss keeps its text for verifier review for at most 24 hours and deletes it immediately after a decision. Pattern checks reduce obvious PII, but free-text detection is not a guarantee.
 - The person-level cap is only as good as the partner's code hygiene: someone handed two codes is two learners to this service. Distribution controls (one code per person at the desk, codes voided when reissued) are a programme responsibility this build cannot enforce, and a funded pilot should add per-code issuance records on the partner side.
 - Cards are sealed to the device key that last used the code. Retyping the code on a new device restores the balance but not cards sealed to the old key — stated in the wallet screen, not hidden.
+- The `admin-demo` / `verifier-demo` tokens are published here and in the consoles, which flag themselves in red while either is in use. They are fine on a laptop and nowhere else; production refuses to start with them.
+- The working checkout carries roughly a gigabyte of dependencies and build output. None of it is tracked — `./make-submission.sh` exports the tracked source and lockfiles only (about 1.8 MB, 55 files) so a reviewer installs dependencies themselves.
 - No partnership with the City of Vancouver, any library, settlement organisation, brand or provider is claimed.
 - The chain cannot verify that learning happened. It makes the verifiers and criteria traceable.

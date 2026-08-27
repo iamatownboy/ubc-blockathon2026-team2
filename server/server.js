@@ -45,10 +45,12 @@ const MIME = {
   ".webmanifest": "application/manifest+json",
 };
 const SECURITY_HEADERS = {
-  "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  // frame-ancestors 'self' so the demo stage can hold the learner app in a
+  // frame; nothing outside this origin can frame any of it.
+  "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'",
   "referrer-policy": "no-referrer",
   "x-content-type-options": "nosniff",
-  "x-frame-options": "DENY",
+  "x-frame-options": "SAMEORIGIN",
 };
 
 class HttpError extends Error {
@@ -715,6 +717,7 @@ if (require.main === module) {
     console.log(`  learner app              ${base}/learner/`);
     console.log(`  verifier console         ${base}/verifier/     token: ${app.tokens.verifier}`);
     console.log(`  admin console            ${base}/admin/        token: ${app.tokens.admin}`);
+    console.log(`  demo stage (for a laptop)${base}/demo/`);
     console.log(`  public stats             ${base}/api/stats`);
     console.log(`  ledger                   ${ledger.mode === "chain" ? "on-chain (LanguageCredits)" : "demo mirror (JavaScript ledger — shown as such on every screen)"}`);
     console.log(

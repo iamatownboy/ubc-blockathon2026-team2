@@ -5,8 +5,12 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const $token = $("token");
   $token.value = localStorage.getItem("languagetoken.adminToken") || "admin-demo";
+  /** Say plainly when the published demo token is the one in use. */
+  const flagDemoToken = () => $("demo-warn").classList.toggle("hidden", $token.value !== "admin-demo");
+  flagDemoToken();
   $token.addEventListener("change", () => {
     localStorage.setItem("languagetoken.adminToken", $token.value);
+    flagDemoToken();
     connectStream();
     load();
   });

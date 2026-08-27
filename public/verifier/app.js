@@ -8,8 +8,12 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   $token.value = localStorage.getItem("languagetoken.verifierToken") || "verifier-demo";
+  /** Say plainly when the published demo token is the one in use. */
+  const flagDemoToken = () => $("demo-warn").classList.toggle("hidden", $token.value !== "verifier-demo");
+  flagDemoToken();
   $token.addEventListener("change", () => {
     localStorage.setItem("languagetoken.verifierToken", $token.value);
+    flagDemoToken();
     load();
   });
 
