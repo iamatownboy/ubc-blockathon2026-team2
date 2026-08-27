@@ -201,9 +201,13 @@ test("11. every catalog product is closed loop and priced at 20 credits per doll
 });
 
 test("12. an open-loop product is refused — by the catalog rule and by the admin console", async () => {
-  assert.throws(() => catalog.syncFromProvider(PROVIDER_PRODUCTS), catalog.OpenLoopProductError);
-  const closedOnly = PROVIDER_PRODUCTS.filter((p) => !p.openLoop);
-  assert.equal(catalog.syncFromProvider(closedOnly).length, closedOnly.length);
+  const sync = catalog.syncFromProvider(PROVIDER_PRODUCTS);
+  assert.equal(sync.accepted.length, PROVIDER_PRODUCTS.filter((p) => !p.openLoop).length);
+  assert.deepEqual(sync.refused.map((r) => r.productCode), ["VISA-CA-2500"]);
+  const viaApi = await call("/api/admin/catalog/sync", { method: "POST", role: "admin" });
+  assert.equal(viaApi.status, 200);
+  assert.deepEqual(viaApi.body.refused.map((r) => r.productCode), ["VISA-CA-2500"]);
+  assert.ok(viaApi.body.accepted.every((p) => p.closedLoop));
   for (const p of [{ productCode: "VISA-CA-2500", brand: "Visa Prepaid" }, { productCode: "X-1", brand: "Mastercard Gift" }, { productCode: "X-2", brand: "Anything", network: "VISA" }, { productCode: "X-3", brand: "Anything", openLoop: true }]) {
     assert.throws(() => catalog.assertClosedLoop(p), catalog.OpenLoopProductError, p.productCode);
   }

@@ -30,6 +30,15 @@ function randomToken(bytes = 24) {
   return crypto.randomBytes(bytes).toString("base64url");
 }
 
+/** Pack a short ASCII string (≤ 32 chars) into a bytes32, right-padded with zeros. */
+function asciiBytes32(text) {
+  const str = String(text);
+  if (str.length > 32 || !/^[\x20-\x7e]*$/.test(str)) throw new Error(`"${str}" does not fit a bytes32 (≤ 32 printable ASCII chars)`);
+  const buf = Buffer.alloc(32);
+  Buffer.from(str, "ascii").copy(buf);
+  return "0x" + buf.toString("hex");
+}
+
 /** Pad an ASCII reason into a bytes32 so it can go into an event. */
 function reasonBytes32(reason) {
   const buf = Buffer.alloc(32);
@@ -43,4 +52,4 @@ function reasonFromBytes32(hex) {
 
 const isBytes32 = (v) => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
 
-module.exports = { bytes32, hashParts, randomHandle, randomToken, reasonBytes32, reasonFromBytes32, isBytes32 };
+module.exports = { bytes32, hashParts, randomHandle, randomToken, asciiBytes32, reasonBytes32, reasonFromBytes32, isBytes32 };

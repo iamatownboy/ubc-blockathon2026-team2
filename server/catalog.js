@@ -95,28 +95,41 @@ function getByProductCode(code) {
 }
 
 /**
- * Accept products from the provider's catalog into ours. Each one goes
- * through assertClosedLoop — an open-loop product anywhere in the list
- * rejects the whole sync, so a partial import cannot slip one in.
+ * Accept products from the provider's catalog into ours. Every product goes
+ * through assertClosedLoop; the ones that fail are returned as refused, with
+ * the reason, so an open-loop card can never slip in — and the admin console
+ * can show exactly what was turned away.
  */
 function syncFromProvider(providerProducts) {
   const accepted = [];
+  const refused = [];
   for (const p of providerProducts) {
-    assertClosedLoop(p);
-    accepted.push({
-      itemId: bytes32(`item:${p.productCode.toLowerCase()}`),
-      slug: p.productCode.toLowerCase(),
-      brand: p.brand,
-      title: `${p.brand} — CAD ${p.valueCad} gift card`,
-      productCode: p.productCode,
-      valueCad: p.valueCad,
-      cost: creditCost(p.valueCad),
-      inventory: 0,
-      active: false,
-      closedLoop: true,
-    });
+    try {
+      assertClosedLoop(p);
+    } catch (err) {
+      refused.push({ productCode: p.productCode, brand: p.brand, reason: err.message });
+      continue;
+    }
+    const known = byProductCode.get(p.productCode);
+    accepted.push(
+      known
+        ? { ...known, listed: true }
+        : {
+            itemId: bytes32(`item:${p.productCode.toLowerCase()}`),
+            slug: p.productCode.toLowerCase(),
+            brand: p.brand,
+            title: `${p.brand} — CAD ${p.valueCad} gift card`,
+            productCode: p.productCode,
+            valueCad: p.valueCad,
+            cost: creditCost(p.valueCad),
+            inventory: 0,
+            active: false,
+            closedLoop: true,
+            listed: false,
+          }
+    );
   }
-  return accepted;
+  return { accepted, refused };
 }
 
 module.exports = {
