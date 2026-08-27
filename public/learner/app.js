@@ -4,14 +4,14 @@
 //       → shop → swap → wallet → reveal (decrypted on this device only).
 (function () {
   const { t, setLang, pick, LANGS } = window.LTi18n;
-  const { ensureIdentity, saveToken, forgetIdentity, openSealed } = window.LTCrypto;
+  const { ensureIdentity, saveToken, saveCode, openSealed } = window.LTCrypto;
 
   const $app = document.getElementById("app");
   const $nav = document.getElementById("nav");
   const $lang = document.getElementById("lang");
   const $toast = document.getElementById("toast");
 
-  const state = { identity: null, token: null, handle: null, me: null, missions: [], catalog: [], wallet: [], screen: "home", mission: null, attempts: [], coach: null, answers: {}, result: null, revealed: {}, paused: false, coachMode: "offline" };
+  const state = { identity: null, token: null, handle: null, enrollment: null, enrollError: null, me: null, missions: [], catalog: [], wallet: [], screen: "home", mission: null, attempts: [], coach: null, answers: {}, result: null, revealed: {}, paused: false, coachMode: "offline" };
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const cad = (credits) => (credits / 20).toFixed(2);
@@ -38,15 +38,22 @@
     return data;
   }
 
-  async function openSession(fresh = false) {
+  async function openSession(fresh = false, code = null) {
     state.identity = await ensureIdentity();
     const body = { publicKey: state.identity.publicJwk, language: window.LTi18n.lang };
     if (!fresh && state.identity.token) body.token = state.identity.token;
+    const use = code ?? state.identity.code ?? null;
+    if (use) body.enrollmentCode = use;
     const res = await fetch("/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 403) throw Object.assign(new Error(data.message ?? t("error")), { code: data.error });
     state.token = data.token;
     state.handle = data.handle;
     await saveToken(data.token);
+    if (use && use !== state.identity.code) {
+      await saveCode(use);
+      state.identity.code = use;
+    }
   }
 
   async function refresh() {
@@ -66,6 +73,18 @@
     $toast.textContent = msg;
     clearTimeout(toast.timer);
     toast.timer = setTimeout(() => $toast.classList.add("hidden"), 3500);
+  }
+
+  /** The badge that says, on every screen, which ledger this run is using. */
+  function renderLedgerBadge() {
+    const el = document.getElementById("ledger-badge");
+    if (!el) return;
+    const mode = state.me?.ledgerMode;
+    if (!mode) return (el.className = "badge hidden");
+    const chain = mode === "chain";
+    el.className = `badge ${chain ? "green" : "amber"}`;
+    el.textContent = chain ? t("ledger_onchain") : t("ledger_mirror");
+    el.title = chain ? t("ledger_onchain_hint") : t("ledger_mirror_hint");
   }
 
   function renderNav() {
@@ -92,7 +111,7 @@
         return `<div class="card mission ${m.completed ? "done" : ""}" data-mission="${m.missionId}"><div class="ic">${m.icon}</div><div class="grow"><h3>${esc(pick(m.title))}</h3><div class="meta">${esc(pick(m.place))} · ${esc(t("mission_min", { n: m.minutes }))}</div></div>${status}</div>`;
       })
       .join("");
-    return `${balanceCard()}<h2 style="margin-top:1.1rem">${esc(t("missions_title"))}</h2><div class="stack">${list}</div><p class="tiny" style="margin-top:1.2rem">${esc(t("footer"))}<br>${esc(t("handle"))}: <span class="mono">${esc(state.handle.slice(0, 10))}…</span> · <a href="#" data-reset>${esc(t("reset"))}</a></p>`;
+    return `${balanceCard()}<h2 style="margin-top:1.1rem">${esc(t("missions_title"))}</h2><div class="stack">${list}</div><p class="tiny" style="margin-top:1.2rem">${esc(t("footer"))}<br>${esc(t("handle"))}: <span class="mono">${esc(state.handle.slice(0, 10))}…</span></p>`;
   }
 
   function renderMissionIntro() {
@@ -171,9 +190,17 @@
   }
 
   function render() {
+    if (state.screen === "enrol") {
+      $nav.innerHTML = "";
+      $app.innerHTML = renderEnrol();
+      renderLedgerBadge();
+      document.getElementById("enrol-code")?.focus();
+      return;
+    }
     renderNav();
     const screens = { home: renderHome, mission: renderMissionIntro, "mission-practise": renderPractise, "mission-coach": renderCoach, "mission-check": renderCheck, "mission-result": renderResult, shop: renderShop, wallet: renderWallet };
     $app.innerHTML = (screens[state.screen] ?? renderHome)();
+    renderLedgerBadge();
     window.scrollTo(0, 0);
   }
 
@@ -200,11 +227,13 @@
   async function askCoach() {
     collectAttempts();
     if (state.attempts.every((a) => !a)) return toast(t("practise_hint"), "amber");
+    const allowExternalCoach = state.coachMode === "live" ? window.confirm(t("coach_consent")) : false;
+    if (state.coachMode === "live" && !allowExternalCoach) return;
     const btn = $app.querySelector("[data-coach]");
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner"></span> ${esc(t("practise_coach"))}`;
     try {
-      const { feedback, source } = await api("/api/coach", { method: "POST", body: { missionId: state.mission.missionId, attempts: state.attempts, language: window.LTi18n.lang } });
+      const { feedback, source } = await api("/api/coach", { method: "POST", body: { missionId: state.mission.missionId, attempts: state.attempts, language: window.LTi18n.lang, allowExternalCoach } });
       state.coach = feedback;
       state.coachSource = source;
       go("mission-coach");
@@ -292,6 +321,30 @@
     }
   }
 
+  function renderEnrol() {
+    const demo = (state.enrollment?.demoCodes ?? []).slice(0, 4);
+    const hint = demo.length ? `<p class="tiny">${esc(t("enrol_demo"))} <span class="mono">${demo.map(esc).join("</span> · <span class=\"mono\">")}</span></p>` : "";
+    const err = state.enrollError ? `<p class="notice red">${esc(state.enrollError)}</p>` : "";
+    return `<div class="card"><div class="big">🎫</div><h2 style="text-align:center">${esc(t("enrol_title"))}</h2><p class="muted">${esc(t("enrol_body"))}</p>${err}<input id="enrol-code" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="${esc(t("enrol_placeholder"))}" value="${esc(state.enrolDraft ?? "")}"><button class="btn-primary btn-block" style="margin-top:.8rem" data-enrol>${esc(t("enrol_submit"))}</button>${hint}<p class="tiny">${esc(t("enrol_privacy"))}</p></div>`;
+  }
+
+  async function submitEnrol() {
+    const input = document.getElementById("enrol-code");
+    const code = (input?.value ?? "").trim();
+    state.enrolDraft = code;
+    if (!code) return toast(t("enrol_placeholder"), "amber");
+    state.enrollError = null;
+    try {
+      await openSession(true, code);
+      await refresh();
+      state.screen = "home";
+      render();
+    } catch (err) {
+      state.enrollError = err.code === "enrollment_invalid" ? t("enrol_invalid") : err.message;
+      render();
+    }
+  }
+
   // ---------------------------------------------------------------- events
 
   $app.addEventListener("click", (e) => {
@@ -305,9 +358,12 @@
     if (s) return confirmSwap(s.dataset.swap);
     const r = e.target.closest("[data-reveal]");
     if (r) return reveal(Number(r.dataset.reveal));
-    if (e.target.closest("[data-reset]")) {
+    if (e.target.closest("[data-enrol]")) return submitEnrol();
+  });
+  $app.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.id === "enrol-code") {
       e.preventDefault();
-      forgetIdentity().then(() => location.reload());
+      submitEnrol();
     }
   });
   $app.addEventListener("change", (e) => {
@@ -340,7 +396,15 @@
 
   (async () => {
     try {
-      await openSession();
+      state.enrollment = await fetch("/api/enrollment").then((r) => r.json()).catch(() => ({ required: false, demoCodes: [] }));
+      try {
+        await openSession();
+      } catch (err) {
+        if (err.code !== "enrollment_required" && err.code !== "enrollment_invalid") throw err;
+        state.enrollError = err.code === "enrollment_invalid" ? t("enrol_invalid") : null;
+        state.screen = "enrol";
+        return render();
+      }
       await refresh();
       render();
     } catch (err) {

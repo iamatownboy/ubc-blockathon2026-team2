@@ -51,6 +51,40 @@ function plainError(err) {
 function createSwapService({ ledger, store, provider }) {
   const log = (event, fields) => store.log(event, fields);
 
+  async function settleDurable(record) {
+    const ledgerSwap = await ledger.swapOf(record.swapId);
+    if (ledgerSwap.status === "Requested") {
+      await ledger.settleSwap("fulfiller", record.swapId, record.voucherCommitment);
+    } else if (ledgerSwap.status !== "Settled") {
+      throw Object.assign(new Error(`cannot settle swap ${record.swapId} from ${ledgerSwap.status}`), { name: "InvalidSwap" });
+    }
+    record.status = "Settled";
+    record.settledAt = record.settledAt ?? new Date().toISOString();
+    store.swaps.put(record.swapId, record);
+    log("swap.settled", { swapId: record.swapId, orderRef: record.orderRef, last4: record.last4, recovered: record.recovered });
+    return publicView(record);
+  }
+
+  async function sealAndSettle(record, order, { recovered = false, after } = {}) {
+    const device = store.devices.get(record.handle);
+    if (!device?.publicKey) throw new Error(`device key unavailable for swap ${record.swapId}`);
+    const card = order.card;
+    record.sealed = sealing.seal(
+      { brand: record.brand, productCode: record.productCode, valueCad: record.valueCad, cardnbr: card.cardnbr, pin: card.pin, expiry: card.expiry, orderRef: order.orderRef },
+      device.publicKey
+    );
+    record.last4 = String(card.cardnbr).slice(-4);
+    record.orderRef = order.orderRef;
+    record.voucherCommitment = hashParts("voucher", record.requestHash, order.orderRef, card.cardnbr, card.pin);
+    record.recovered = recovered;
+    record.status = "Sealed";
+    record.sealedAt = new Date().toISOString();
+    // The ciphertext is durable before the irreversible ledger settlement.
+    store.swaps.put(record.swapId, record);
+    if (recovered) log("swap.recovered", { swapId: record.swapId, requestHash: record.requestHash, orderRef: order.orderRef, after: after ?? "restart" });
+    return settleDurable(record);
+  }
+
   async function swap({ session, itemId }) {
     const item = catalog.get(itemId);
     if (!item) throw Object.assign(new Error("unknown item"), { name: "ItemNotAvailable", args: { itemId } });
@@ -88,7 +122,6 @@ function createSwapService({ ledger, store, provider }) {
       const result = await provider.orderOnce({ productCode: item.productCode, requestId: requestHash });
       order = result.order;
       record.recovered = result.recovered;
-      if (result.recovered) log("swap.recovered", { swapId, requestHash, orderRef: order.orderRef, after: result.after });
     } catch (err) {
       // 2'. refund: credits and stock restored exactly --------------------------
       const reason = err.kind ? `provider:${err.kind}` : "provider:error";
@@ -101,26 +134,32 @@ function createSwapService({ ledger, store, provider }) {
       return { ...publicView(record), error: plainError({ name: "ProviderError" }) };
     }
 
-    // 3. seal to the learner's key — plaintext never written down ------------
-    const card = order.card;
-    const sealed = sealing.seal(
-      { brand: item.brand, productCode: item.productCode, valueCad: item.valueCad, cardnbr: card.cardnbr, pin: card.pin, expiry: card.expiry, orderRef: order.orderRef },
-      session.publicKey
-    );
-    const voucherCommitment = hashParts("voucher", requestHash, order.orderRef, card.cardnbr, card.pin);
-    const last4 = String(card.cardnbr).slice(-4);
+    // 3. seal durably, then 4. settle with the commitment only ----------------
+    return sealAndSettle(record, order, { recovered: record.recovered, after: record.recovered ? "network" : undefined });
+  }
 
-    // 4. settle — commitment only ---------------------------------------------
-    await ledger.settleSwap("fulfiller", swapId, voucherCommitment);
-    record.status = "Settled";
-    record.sealed = sealed;
-    record.last4 = last4;
-    record.orderRef = order.orderRef;
-    record.voucherCommitment = voucherCommitment;
-    record.settledAt = new Date().toISOString();
-    store.swaps.put(swapId, record);
-    log("swap.settled", { swapId, orderRef: order.orderRef, last4, recovered: record.recovered });
-    return publicView(record);
+  /** Reconcile cards issued before a process interruption without re-ordering. */
+  async function recoverPending() {
+    const pending = store.swaps.find((record) => record.status === "Requested" || record.status === "Sealed");
+    const results = [];
+    for (const record of pending) {
+      try {
+        if (record.status === "Sealed") {
+          results.push(await settleDurable(record));
+          continue;
+        }
+        const order = await provider.lookup(record.requestHash);
+        if (!order) {
+          results.push({ swapId: record.swapId, status: "Requested", recovered: false });
+          continue;
+        }
+        results.push(await sealAndSettle(record, order, { recovered: true, after: "restart" }));
+      } catch (err) {
+        log("swap.recovery_deferred", { swapId: record.swapId, error: String(err?.message ?? err).slice(0, 160) });
+        results.push({ swapId: record.swapId, status: record.status, error: "recovery_deferred" });
+      }
+    }
+    return results;
   }
 
   /** Admin-side cancel of a swap still Requested (e.g. a stuck one). */
@@ -156,7 +195,7 @@ function createSwapService({ ledger, store, provider }) {
       .map(publicView);
   }
 
-  return { swap, cancel, reveal, walletOf, plainError };
+  return { swap, recoverPending, cancel, reveal, walletOf, plainError };
 }
 
 /** What a client may see. The sealed blob is ciphertext; the server cannot open it. */

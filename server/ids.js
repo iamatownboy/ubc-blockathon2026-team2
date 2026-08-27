@@ -26,6 +26,17 @@ function randomHandle() {
   return "0x" + crypto.randomBytes(32).toString("hex");
 }
 
+/**
+ * Stable pseudonymous handle for a device key. The server secret prevents
+ * observers from deriving the on-chain handle from a public JWK, while the
+ * same device can recover its programme identity after a service restart.
+ */
+function handleForPublicKey(jwk, secret) {
+  if (!secret) throw new Error("identity secret is required");
+  const publicKey = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
+  return "0x" + crypto.createHmac("sha256", String(secret)).update("languagetoken/device/v1\0").update(publicKey).digest("hex");
+}
+
 function randomToken(bytes = 24) {
   return crypto.randomBytes(bytes).toString("base64url");
 }
@@ -43,4 +54,4 @@ function reasonFromBytes32(hex) {
 
 const isBytes32 = (v) => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
 
-module.exports = { bytes32, hashParts, randomHandle, randomToken, reasonBytes32, reasonFromBytes32, isBytes32 };
+module.exports = { bytes32, hashParts, randomHandle, handleForPublicKey, randomToken, reasonBytes32, reasonFromBytes32, isBytes32 };

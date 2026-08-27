@@ -38,6 +38,8 @@ contract LanguageCredits is AccessControl, Pausable {
     uint128 public constant LIFETIME_CAP = 15000;
     /// @dev Credits expire this long after the learner's most recent award.
     uint64 public constant CREDIT_TTL = 365 days;
+    /// @dev An expired account still gets a usable window for an exact refund.
+    uint64 public constant REFUND_GRACE_PERIOD = 30 days;
 
     // ---------------------------------------------------------------- types
 
@@ -303,7 +305,14 @@ contract LanguageCredits is AccessControl, Pausable {
         Swap storage swap = _swap(swapId);
         if (swap.status != SwapStatus.Requested) revert InvalidSwap(swapId);
         swap.status = SwapStatus.Cancelled;
-        _accounts[swap.learnerHash].balance += swap.cost;
+        Account storage account = _accounts[swap.learnerHash];
+        if (_isExpired(account)) {
+            // First account for any other expired balance, then make the
+            // exact refund usable for a short and explicit grace period.
+            if (account.balance != 0) _expire(swap.learnerHash, account);
+            account.expiresAt = uint64(block.timestamp) + REFUND_GRACE_PERIOD;
+        }
+        account.balance += swap.cost;
         _items[swap.itemId].inventory += 1;
         totalInSwap -= swap.cost;
         totalOutstanding += swap.cost;

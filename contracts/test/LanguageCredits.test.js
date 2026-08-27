@@ -21,6 +21,7 @@ const REWARD = 100n;
 const COST = 100n;
 const STOCK = 3n;
 const TTL = 365n * 24n * 60n * 60n;
+const REFUND_GRACE = 30n * 24n * 60n * 60n;
 
 const advance = async (seconds) => {
   await network.provider.send("evm_increaseTime", [Number(seconds)]);
@@ -180,6 +181,20 @@ describe("LanguageCredits", function () {
       await expect(c.connect(redeemer).cancelSwap(0, REASON)).to.be.revertedWithCustomError(c, "AccessControlUnauthorizedAccount");
       await c.connect(admin).cancelSwap(0, REASON);
       expect(await c.balanceOf(LEARNER)).to.equal(REWARD);
+    });
+
+    it("keeps a refund usable after account expiry and expires only the unrelated balance", async function () {
+      await award(LEARNER, MISSION);
+      await award(LEARNER, MISSION_2);
+      await swap();
+      await advance(TTL);
+      const receipt = await (await c.connect(fulfiller).cancelSwap(0, REASON)).wait();
+      const block = await ethers.provider.getBlock(receipt.blockNumber);
+      const account = await c.accountOf(LEARNER);
+      expect(await c.balanceOf(LEARNER)).to.equal(COST);
+      expect(account.expiresAt).to.equal(BigInt(block.timestamp) + REFUND_GRACE);
+      expect(await c.totalOutstanding()).to.equal(COST);
+      expect(await c.totalExpired()).to.equal(REWARD);
     });
   });
 

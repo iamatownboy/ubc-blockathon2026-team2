@@ -6,7 +6,7 @@ Newcomers practise three-minute, real-world English missions and earn
 non-transferable credits, which they swap for gift cards from businesses in
 their own neighbourhood — a Tim Hortons card for 100 credits, delivered into
 their app and sealed to their device. The coach never decides who gets paid,
-the ledger holds nothing that identifies anyone, and the credits cannot become
+the on-chain ledger holds no direct identifiers, and the credits cannot become
 cash by design rather than by policy.
 
 Built to `LanguageToken Blockathon Plan.pdf` (in the parent folder).
@@ -27,23 +27,52 @@ crosses a network boundary) and the service on **:8787**:
 
 | Client | URL | Notable |
 |---|---|---|
-| Learner app | http://localhost:8787/learner/ | 430px. No account, no e-mail, no wallet software, no gas. Generates its own ECDH keypair (`extractable: false`) in IndexedDB. EN / 한국어 / 中文. |
+| Learner app | http://localhost:8787/learner/ | 430px. No account, no e-mail, no wallet software, no gas. A partner-issued participation code (demo: `WELCOME-01` … `WELCOME-12`, printed at startup) opens the session; the device generates its own ECDH keypair (`extractable: false`) in IndexedDB to receive cards. EN / 한국어 / 中文. |
 | Verifier console | http://localhost:8787/verifier/ | The review queue. Approving awards the mission's configured amount — there is **no field to type an amount into**. Token: `verifier-demo` |
 | Admin console | http://localhost:8787/admin/ | Missions, catalog, pause, live ledger events, service log — and the provider failure switches. Token: `admin-demo` |
 | Public stats | http://localhost:8787/api/stats | Readable by anyone, no login. Aggregate only. |
 
 Requires Node ≥ 20 (`. ~/.nvm/nvm.sh` on this machine).
 
-Optional: `export ANTHROPIC_API_KEY=…` turns the coach from the offline stub
-into live Claude feedback (the SDK is picked up from `node_modules/` or
-`web/node_modules/` if present — `npm install` at the root fetches it).
+Optional: `COACH=live ANTHROPIC_API_KEY=…` makes live coaching available
+(the learner must still explicitly consent before their practice text leaves
+the service). The SDK is picked up from `node_modules/` or
+`web/node_modules/` if present — `npm install` at the root fetches it.
 Without a key, or on any API failure, the offline coach keeps the demo moving.
+
+### Who is allowed to earn
+
+The lifetime cap has to bound a *person*, not a browser. Newcomers often have
+no stable phone, e-mail or ID, so the programme uses the boundary the partners
+already have: a library, settlement agency or school hands out a printed
+participation code.
+
+The server stores no code — only an HMAC of it — and derives the learner
+handle from that same HMAC. Three consequences follow, and all three are
+tested:
+
+* an unissued code cannot open a session at all;
+* clearing the browser and retyping the code restores the same learner —
+  same balance, same completed missions, same lifetime cap, so "forget this
+  device" is no longer a way to farm a second gift card;
+* the service still holds no name, no e-mail and no phone number. The link
+  between a code and a human lives on paper, at the partner desk.
+
+`ENROLLMENT_CODES` supplies the real list (comma separated). Demo codes exist
+only when `NODE_ENV` is not `production`; production with no code list refuses
+to start. `ENROLLMENT=open` disables the check and is an explicit, logged
+opt-out that reduces the cap to per-device — it is not a mode to demo in.
 
 ### Chain mode
 
-The backend runs on the JS mirror of the contract by default (`ledger.js`),
-so a dead RPC endpoint can never stop the pitch. To run against the real
-contract:
+With no `LEDGER` set, the service runs on the contract when
+`shared/deployment.json` exists and falls back to the JS mirror (`ledger.js`)
+only when the chain is genuinely absent or unreachable — so the final demo is
+on chain by default and a dead RPC endpoint still cannot stop the pitch.
+**Which one is running is shown as a badge on every screen** (`On-chain` /
+`Demo mirror`), so a mirror run is never presented as an on-chain one.
+`LEDGER=chain` makes a chain failure a hard failure; `LEDGER=memory` forces
+the mirror. To run against the real contract:
 
 ```bash
 cd contracts && npm install                                   # once
@@ -53,17 +82,40 @@ LEDGER=chain node server/server.js                            # terminal 3
 ```
 
 `./reset-demo.sh` restarts the chain, redeploys and restarts the service.
-State is in memory; restarting the service clears every learner, balance and
-wallet.
+The default memory-ledger demo is intentionally ephemeral. In chain mode,
+pseudonymous device public keys and sealed swap records are written atomically
+to `.data/state.json`; startup reconciliation looks up a pending provider
+request instead of ordering a second card.
+
+For anything beyond a local demo, set strong secrets rather than using the
+published demo values:
+
+```bash
+NODE_ENV=production \
+IDENTITY_SECRET='at-least-32-random-bytes' \
+ADMIN_TOKEN='a-long-random-token' \
+VERIFIER_TOKEN='a-different-long-random-token' \
+LEDGER=chain node server/server.js
+```
+
+Production mode refuses to start with the demo identity secret or demo role
+tokens. Real provider use also requires provider onboarding, programme/catalog
+approval and the provider's actual authentication setup; it is not only a URL
+change.
 
 ## Tests
 
 ```bash
-npm test                          # 27 ledger + 24 end-to-end, under 10 s, no toolchain
-cd contracts && npx hardhat test  # 22 Solidity tests (needs the network once, for npm install)
+npm test                          # 28 ledger + 35 end-to-end, under 10 s, no toolchain
+cd contracts && npx hardhat test  # 23 Solidity tests (needs the network once, for npm install)
+cd contracts && SOLC_JS=1 npx hardhat test   # same 23, offline: uses the solcjs in node_modules
 ```
 
-**Ledger, 27 tests.** Unauthorised award; the ABI has no amount to pass;
+`SOLC_JS=1` is the escape hatch for a laptop that cannot download a compiler
+or write into the checkout; it compiles with the bundled solcjs and puts build
+output in `/tmp`. All 23 pass either way.
+
+**Ledger, 28 tests.** Unauthorised award; the ABI has no amount to pass;
 duplicate completion; version bump; lifetime cap as a ceiling rather than a
 round count; short balance; empty stock; inactive item; double-swap of one
 balance; settle-once; the redeemer key refused at settle; cancel restoring
@@ -71,7 +123,9 @@ credits and stock exactly; expiry, sweeping, and the clock extending; pause
 blocking earning while still allowing refunds; and conservation — awarded
 equals outstanding plus in-swap plus swapped plus expired.
 
-**End to end, 24 tests.** The coach filter stripping `pass` and `credits`; a
+**End to end, 35 tests.** A session refused without a partner-issued code and
+a wiped browser landing back on the same handle, balance and lifetime cap; the
+code never appearing in the store; the coach filter stripping `pass` and `credits`; a
 tampered submission awarding nothing; grading and the review queue; the
 verifier awarding the configured amount and ignoring an amount in the request;
 every catalog product closed loop and an open-loop one refused; a swap
@@ -95,7 +149,8 @@ server/
   sealing.js       ECDH + HKDF + AES-GCM to the learner's key
   assessment.js    three missions, fixed grading, the filtered coach
   catalog.js       closed-loop products; open-loop cannot be listed
-  store.js         off-chain state, with a PII refusal check
+  store.js         minimal off-chain state, review TTL, atomic sealed-swap persistence
+  enrollment.js    partner-issued participation codes → one stable handle per person
   ids.js           bytes32 helpers, random handles
 public/learner · public/admin · public/verifier
 test/ledger.test.js · test/e2e.test.js
@@ -104,12 +159,12 @@ test/ledger.test.js · test/e2e.test.js
 
 ## The loop, and where the coach is not allowed to stand
 
-1. Open the app. A device keypair is generated in the browser and never leaves it.
+1. Open the app and enter the participation code from the partner desk. A device keypair is generated in the browser and never leaves it; the code — not the browser — is what fixes the learner's handle, balance and lifetime cap.
 2. Practise three phrasings (library, pharmacy, or school office).
 3. The coach rewrites them naturally and explains why — in the learner's language.
    Its output passes an allowlist of four fields; the offline coach deliberately
    returns `pass: true` and `credits: 999999` so a test can prove the filter strips them.
-4. Fixed multiple-choice and required-phrase checks decide pass or fail.
+4. Fixed multiple-choice and required-phrase checks decide pass or fail. A canonical proof-v2 hash commits to both answers and learner-written attempts without putting either on chain.
 5. A pass awards the mission's configured 100 credits. A near miss goes to the verifier console.
 6. Open the shop: Tim Hortons, Save-On-Foods, TransLink, a local café — each with a credit price and live stock.
 7. Tap swap. Credits burn, stock decrements, the swap opens as *Requested*.
@@ -142,6 +197,7 @@ function pause() / unpause()
 | `MAX_MISSION_REWARD` | 2,000 credits · CAD 100 | what one bad award can cost |
 | `LIFETIME_CAP` | 15,000 credits · CAD 750 | a farmed handle |
 | `CREDIT_TTL` | 365 days from last award | standing liability and resale incentive |
+| `REFUND_GRACE_PERIOD` | 30 days | an exact late refund remains usable instead of returning into an expired account |
 
 100 credits = CAD 5.00, fixed by the catalog. There is no market, no price, and nothing to speculate on.
 
@@ -167,6 +223,9 @@ Arm **error** or **timeout** instead and watch the refund land.
 - One verifier key. The mission registry is what makes that survivable, not acceptable.
 - The demo operator holds every role and submits every transaction.
 - Expiry is per account, not per lot.
-- State is in memory. Restarting the server clears every learner, balance and wallet.
+- In memory-ledger mode, balances are intentionally ephemeral. Chain mode persists only device public keys and sealed swap state; session tokens and learner-written review text are not written to disk.
+- Passed and failed submissions retain structured audit results, not learner-written text. A near miss keeps its text for verifier review for at most 24 hours and deletes it immediately after a decision. Pattern checks reduce obvious PII, but free-text detection is not a guarantee.
+- The person-level cap is only as good as the partner's code hygiene: someone handed two codes is two learners to this service. Distribution controls (one code per person at the desk, codes voided when reissued) are a programme responsibility this build cannot enforce, and a funded pilot should add per-code issuance records on the partner side.
+- Cards are sealed to the device key that last used the code. Retyping the code on a new device restores the balance but not cards sealed to the old key — stated in the wallet screen, not hidden.
 - No partnership with the City of Vancouver, any library, settlement organisation, brand or provider is claimed.
 - The chain cannot verify that learning happened. It makes the verifiers and criteria traceable.

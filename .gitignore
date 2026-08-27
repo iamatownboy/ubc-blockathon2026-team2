@@ -17,6 +17,7 @@ shared/deployment.json
 .env
 .env.*
 !.env.example
+.data/
 
 # logs / os
 *.log

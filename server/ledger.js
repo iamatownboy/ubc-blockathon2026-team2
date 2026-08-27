@@ -26,6 +26,7 @@ const ROLES = {
 const MAX_MISSION_REWARD = 2000;
 const LIFETIME_CAP = 15000;
 const CREDIT_TTL = 365 * 24 * 60 * 60;
+const REFUND_GRACE_PERIOD = 30 * 24 * 60 * 60;
 
 const SWAP_STATUS = ["None", "Requested", "Settled", "Cancelled"];
 
@@ -240,7 +241,15 @@ class MemoryLedger {
     const swap = this._swap(swapId);
     if (swap.status !== "Requested") throw new LedgerError("InvalidSwap", { swapId });
     swap.status = "Cancelled";
-    this._account(swap.learnerHash).balance += swap.cost;
+    const account = this._account(swap.learnerHash);
+    if (this._isExpired(account)) {
+      // Do not return usable credits into an already-expired account. Any
+      // other expired balance is accounted for first; the exact swap refund
+      // then receives a short, explicit window in which it can be spent.
+      if (account.balance !== 0) this._expire(swap.learnerHash, account);
+      account.expiresAt = this.now() + REFUND_GRACE_PERIOD;
+    }
+    account.balance += swap.cost;
     this.items.get(swap.itemId).inventory += 1;
     this.totals.inSwap -= swap.cost;
     this.totals.outstanding += swap.cost;
@@ -552,9 +561,47 @@ class ChainLedger {
 const normalise = (v) => (typeof v === "bigint" ? (v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : v.toString()) : v);
 
 /** Pick the ledger from the environment. */
+const DEPLOYMENT_FILE = path.join(__dirname, "..", "shared", "deployment.json");
+
+/**
+ * Which ledger backs the service.
+ *
+ *   LEDGER=chain    the contract, and a failure is a failure (deploy first)
+ *   LEDGER=memory   the JavaScript mirror, always
+ *   unset           the contract when a local deployment exists, otherwise
+ *                   the mirror — so the final demo is on chain by default
+ *                   and only falls back when the chain is genuinely absent
+ *
+ * The chosen mode is shown on every screen; a mirror run is never presented
+ * as an on-chain one.
+ */
 function createLedger(env = process.env) {
   if (env.LEDGER === "chain") return new ChainLedger();
+  if (env.LEDGER === "memory") return new MemoryLedger();
+  if (fs.existsSync(DEPLOYMENT_FILE)) {
+    try {
+      return new ChainLedger();
+    } catch {
+      /* no ethers, unreadable deployment — the mirror still runs the demo */
+    }
+  }
   return new MemoryLedger();
+}
+
+/**
+ * Confirm the chain actually answers before the demo starts. A deployment
+ * file with a dead RPC behind it is exactly the situation where a silent
+ * fallback is better than a crash — and a loud badge is better than both.
+ */
+async function verifyLedger(ledger, env = process.env) {
+  if (ledger.mode !== "chain") return { ledger, fellBack: false };
+  try {
+    await ledger.stats();
+    return { ledger, fellBack: false };
+  } catch (err) {
+    if (env.LEDGER === "chain") throw err; // asked for the chain explicitly
+    return { ledger: new MemoryLedger(), fellBack: true, reason: String(err?.message ?? err).slice(0, 160) };
+  }
 }
 
 module.exports = {
@@ -562,10 +609,12 @@ module.exports = {
   MAX_MISSION_REWARD,
   LIFETIME_CAP,
   CREDIT_TTL,
+  REFUND_GRACE_PERIOD,
   LedgerError,
   MemoryLedger,
   ChainLedger,
   HARDHAT_KEYS,
   createLedger,
+  verifyLedger,
   ZERO32,
 };

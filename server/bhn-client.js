@@ -1,9 +1,9 @@
 // The gift card provider client.
 //
-// The provider is mocked; the client is not. It does certificate-style
-// auth, idempotency keys, order lookup and timeout recovery against a
-// separate listener over HTTP. Pointing it at a real sandbox is a base URL
-// and a credential.
+// The provider is mocked; the client is not. It exercises auth-shaped
+// headers, idempotency keys, order lookup and timeout recovery against a
+// separate listener over HTTP. A real sandbox additionally requires provider
+// onboarding, approved product configuration and its actual certificate setup.
 //
 // The rule that matters: a timeout tells you nothing about whether the
 // provider issued a card. Retry blindly and you buy two. So a retry is a

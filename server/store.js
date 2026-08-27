@@ -1,14 +1,20 @@
-// Off-chain state, in memory, with a PII refusal check.
+// Off-chain state with a PII refusal check and short-lived review content.
 //
-// What lives here: sessions (random handle ↔ device public key), submissions
-// and the review queue, swap records with *sealed* card blobs, and the
-// service log. What can never live here: a name, e-mail, phone number,
-// street address or device id. The store refuses to write them at all —
-// by key and by value — so the mistake is not available even by accident.
+// What lives here: sessions (random handle ↔ device public key), structured
+// submission audit records, short-lived pending review text, swap records
+// with *sealed* card blobs, and the service log. Direct identifiers that the
+// filters recognise are refused by key and by value. Free text is retained
+// only while a near-miss awaits review, then removed on decision or expiry.
 //
-// State is in memory. Restarting the server clears every learner, balance
-// and wallet — stated as a limit, not hidden.
+// Session tokens, audit metadata and reviews stay in memory. In chain mode,
+// the main process supplies a file so only device public keys and sealed swap
+// records survive a restart for idempotent order recovery.
 "use strict";
+
+const fs = require("fs");
+const path = require("path");
+
+const REVIEW_TTL_MS = 24 * 60 * 60 * 1000;
 
 class PIIRefusedError extends Error {
   constructor(path, why) {
@@ -66,13 +72,15 @@ function assertNoPII(value, path = "$") {
 }
 
 class Collection {
-  constructor(name) {
+  constructor(name, onChange = null) {
     this.name = name;
+    this.onChange = onChange;
     this.rows = new Map();
   }
   put(id, row) {
     assertNoPII(row, `${this.name}[${id}]`);
     this.rows.set(id, row);
+    if (this.onChange) this.onChange();
     return row;
   }
   get(id) {
@@ -82,7 +90,9 @@ class Collection {
     return this.rows.has(id);
   }
   delete(id) {
-    return this.rows.delete(id);
+    const deleted = this.rows.delete(id);
+    if (deleted && this.onChange) this.onChange();
+    return deleted;
   }
   values() {
     return [...this.rows.values()];
@@ -96,13 +106,69 @@ class Collection {
 }
 
 class Store {
-  constructor() {
+  constructor({ reviewTtlMs = REVIEW_TTL_MS, now = () => Date.now(), file = null } = {}) {
+    this.reviewTtlMs = reviewTtlMs;
+    this.now = now;
+    this.file = file ? path.resolve(file) : null;
+    this.loading = true;
     this.sessions = new Collection("sessions"); // token -> { handle, publicKey, language, createdAt }
     this.submissions = new Collection("submissions"); // id -> graded submission
     this.reviewQueue = new Collection("reviewQueue"); // submissionId -> queued review
-    this.swaps = new Collection("swaps"); // swapId -> swap record (sealed card only)
+    // Only pseudonymous device public keys and sealed swap state are durable.
+    // Session bearer tokens and learner-written review text remain memory-only.
+    this.devices = new Collection("devices", () => this.persist()); // handle -> { publicKey }
+    this.swaps = new Collection("swaps", () => this.persist()); // swapId -> swap record (sealed card only)
     this.logEntries = [];
     this.listeners = new Set();
+    this.load();
+    this.loading = false;
+  }
+
+  load() {
+    if (!this.file || !fs.existsSync(this.file)) return;
+    const parsed = JSON.parse(fs.readFileSync(this.file, "utf8"));
+    for (const [id, row] of parsed.devices ?? []) this.devices.put(id, row);
+    for (const [id, row] of parsed.swaps ?? []) this.swaps.put(id, row);
+  }
+
+  persist() {
+    if (!this.file || this.loading) return;
+    const state = {
+      version: 1,
+      devices: [...this.devices.rows.entries()],
+      swaps: [...this.swaps.rows.entries()],
+    };
+    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    const tmp = `${this.file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+    fs.renameSync(tmp, this.file);
+  }
+
+  /** Remove learner-written text as soon as a review reaches a final state. */
+  finalizeReview(id, status, fields = {}) {
+    const row = this.reviewQueue.get(id);
+    if (!row) return null;
+    row.status = status;
+    row.decidedAt = new Date(this.now()).toISOString();
+    Object.assign(row, fields);
+    delete row.answers;
+    delete row.attempts;
+    this.reviewQueue.put(id, row);
+    return row;
+  }
+
+  /** Expire abandoned reviews without retaining the learner's raw words. */
+  expireReviews() {
+    const now = this.now();
+    let count = 0;
+    for (const row of this.reviewQueue.values()) {
+      if (row.status !== "pending") continue;
+      const deadline = Date.parse(row.reviewExpiresAt ?? "");
+      if (!Number.isFinite(deadline) || deadline > now) continue;
+      this.finalizeReview(row.id, "expired");
+      count += 1;
+    }
+    return count;
   }
 
   /** Service log. Every entry passes the PII check before it is kept. */
@@ -140,6 +206,7 @@ class Store {
   dump() {
     return {
       sessions: this.sessions.values(),
+      devices: this.devices.values(),
       submissions: this.submissions.values(),
       reviewQueue: this.reviewQueue.values(),
       swaps: this.swaps.values(),
@@ -148,4 +215,4 @@ class Store {
   }
 }
 
-module.exports = { Store, Collection, assertNoPII, PIIRefusedError, FORBIDDEN_KEYS };
+module.exports = { Store, Collection, assertNoPII, PIIRefusedError, FORBIDDEN_KEYS, REVIEW_TTL_MS };

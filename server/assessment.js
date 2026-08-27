@@ -315,9 +315,22 @@ function grade(m, submission) {
   return { outcome, passed: outcome === "passed", criteria, missed };
 }
 
-/** Commitment to what was graded. Answers stay off chain; the hash does not. */
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+    .join(",")}}`;
+}
+
+/** Commitment to everything that was graded. The content stays off chain. */
 function proofHash(handle, m, submission, nonce) {
-  return hashParts("proof", handle, m.missionId, m.version, JSON.stringify(submission?.answers ?? {}), nonce);
+  const graded = {
+    answers: submission?.answers ?? {},
+    attempts: Array.isArray(submission?.attempts) ? submission.attempts : [],
+  };
+  return hashParts("proof-v2", handle, m.missionId, m.version, canonicalJson(graded), nonce);
 }
 
 // ---------------------------------------------------------------- coach
@@ -413,7 +426,7 @@ function loadAnthropicSdk() {
 
 let sdkCache;
 function liveCoachAvailable() {
-  if (process.env.COACH === "offline") return false;
+  if (process.env.COACH !== "live") return false;
   if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) return false;
   if (sdkCache === undefined) sdkCache = loadAnthropicSdk();
   return Boolean(sdkCache);
@@ -476,10 +489,10 @@ async function liveCoach({ mission: m, attempts, language }) {
  * filterCoach. Any failure of the live coach falls back to the offline one —
  * the demo never stops because an external API did.
  */
-async function coach({ mission: m, attempts, language = "en" }) {
+async function coach({ mission: m, attempts, language = "en", allowLive = false }) {
   let raw = null;
   let source = "offline";
-  if (liveCoachAvailable()) {
+  if (allowLive && liveCoachAvailable()) {
     try {
       raw = await liveCoach({ mission: m, attempts, language });
       if (raw) source = "live";
@@ -500,6 +513,7 @@ module.exports = {
   missionForClient,
   grade,
   proofHash,
+  canonicalJson,
   filterCoach,
   offlineCoach,
   coach,

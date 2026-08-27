@@ -61,6 +61,20 @@
     }
   }
 
+  /**
+   * The learner's participation code, kept next to the device key so the app
+   * does not ask for it on every visit. It is the learner's own code from a
+   * partner desk; if this store is cleared they type it again and get the
+   * same programme identity back — balance, completed missions and all.
+   */
+  async function saveCode(code) {
+    const id = await get("me");
+    if (id) {
+      id.code = code;
+      await put("me", id);
+    }
+  }
+
   async function forgetIdentity() {
     const db = await openDb();
     await new Promise((resolve) => {
@@ -83,5 +97,5 @@
     return JSON.parse(new TextDecoder().decode(plaintext));
   }
 
-  window.LTCrypto = { ensureIdentity, saveToken, forgetIdentity, openSealed };
+  window.LTCrypto = { ensureIdentity, saveToken, saveCode, forgetIdentity, openSealed };
 })();

@@ -23,14 +23,15 @@ const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
 
-const { createLedger, LedgerError, ROLES, MAX_MISSION_REWARD, LIFETIME_CAP, CREDIT_TTL } = require("./ledger");
+const { createLedger, verifyLedger, LedgerError, ROLES, MAX_MISSION_REWARD, LIFETIME_CAP, CREDIT_TTL } = require("./ledger");
 const { Store, PIIRefusedError } = require("./store");
 const { createProviderClient } = require("./bhn-client");
 const { createMockProvider } = require("./bhn-mock");
 const { createSwapService, plainError } = require("./swap");
 const assessment = require("./assessment");
 const catalog = require("./catalog");
-const { randomHandle, randomToken, hashParts, isBytes32 } = require("./ids");
+const { handleForPublicKey, randomToken, hashParts, isBytes32 } = require("./ids");
+const { createEnrollment } = require("./enrollment");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 const MIME = {
@@ -42,6 +43,12 @@ const MIME = {
   ".png": "image/png",
   ".ico": "image/x-icon",
   ".webmanifest": "application/manifest+json",
+};
+const SECURITY_HEADERS = {
+  "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
 };
 
 class HttpError extends Error {
@@ -61,9 +68,16 @@ function createApp({
   providerTimeoutMs = Number(process.env.PROVIDER_TIMEOUT_MS ?? 4000),
   adminToken = process.env.ADMIN_TOKEN ?? "admin-demo",
   verifierToken = process.env.VERIFIER_TOKEN ?? "verifier-demo",
+  identitySecret = process.env.IDENTITY_SECRET ?? "demo-identity-secret-change-me",
+  enrollment,
   publicDir = PUBLIC_DIR,
 } = {}) {
   if (!providerUrl) throw new Error("createApp needs providerUrl");
+  if (process.env.NODE_ENV === "production") {
+    if (identitySecret === "demo-identity-secret-change-me") throw new Error("IDENTITY_SECRET must be set in production");
+    if (adminToken === "admin-demo" || verifierToken === "verifier-demo") throw new Error("demo role tokens are refused in production");
+  }
+  const enrol = enrollment ?? createEnrollment({ secret: identitySecret });
   const provider = createProviderClient({ baseUrl: providerUrl, cert: providerCert, timeoutMs: providerTimeoutMs });
   const swaps = createSwapService({ ledger, store, provider });
   const streams = new Set();
@@ -87,31 +101,33 @@ function createApp({
 
   /** Roles, missions and catalog — what deploy.js does for the chain. */
   async function seed() {
-    if (ledger.mode !== "memory") return; // the chain was seeded by the deploy script
-    for (const [role, actor] of [
-      [ROLES.VERIFIER_ROLE, "verifier"],
-      [ROLES.REDEEMER_ROLE, "redeemer"],
-      [ROLES.FULFILLER_ROLE, "fulfiller"],
-    ]) {
-      if (!(await ledger.hasRole(role, actor))) await ledger.grantRole("admin", role, actor);
-    }
-    for (const m of assessment.MISSIONS) {
-      const current = await ledger.missionOf(m.missionId);
-      if (!current.exists) await ledger.configureMission("admin", m.missionId, m.reward, m.version, true);
-    }
-    for (const item of catalog.all()) {
-      const current = await ledger.itemOf(item.itemId);
-      if (!current.exists) {
-        await ledger.configureCatalogItem("admin", item.itemId, hashParts("product", item.productCode), item.cost, item.inventory, true);
+    if (ledger.mode === "memory") {
+      for (const [role, actor] of [
+        [ROLES.VERIFIER_ROLE, "verifier"],
+        [ROLES.REDEEMER_ROLE, "redeemer"],
+        [ROLES.FULFILLER_ROLE, "fulfiller"],
+      ]) {
+        if (!(await ledger.hasRole(role, actor))) await ledger.grantRole("admin", role, actor);
+      }
+      for (const m of assessment.MISSIONS) {
+        const current = await ledger.missionOf(m.missionId);
+        if (!current.exists) await ledger.configureMission("admin", m.missionId, m.reward, m.version, true);
+      }
+      for (const item of catalog.all()) {
+        const current = await ledger.itemOf(item.itemId);
+        if (!current.exists) {
+          await ledger.configureCatalogItem("admin", item.itemId, hashParts("product", item.productCode), item.cost, item.inventory, true);
+        }
       }
     }
+    await swaps.recoverPending();
     store.log("service.seeded", { ledger: ledger.mode, missions: assessment.MISSIONS.length, items: catalog.ITEMS.length });
   }
 
   // -------------------------------------------------------------- helpers
 
   const json = (res, status, body) => {
-    res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.writeHead(status, { ...SECURITY_HEADERS, "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     res.end(JSON.stringify(body));
   };
 
@@ -215,13 +231,29 @@ function createApp({
       return { token: body.token, handle: s.handle, language: s.language, resumed: true };
     }
     const publicKey = assertJwk(body.publicKey);
+    // The handle comes from the partner-issued participation code, not from
+    // the device. Clearing the browser therefore restores the same learner —
+    // the same balance, the same completed missions, the same lifetime cap —
+    // instead of minting a fresh one that could be farmed for another card.
+    let handle;
+    if (enrol.required) {
+      const code = typeof body.enrollmentCode === "string" ? body.enrollmentCode : "";
+      if (!code.trim()) throw new HttpError(403, "enrollment_required", "a participation code from a partner desk is required");
+      if (!enrol.accepts(code)) throw new HttpError(403, "enrollment_invalid", "that participation code is not on the programme list");
+      handle = enrol.handleFor(code);
+    } else {
+      handle = handleForPublicKey(publicKey, identitySecret);
+    }
     const token = randomToken(24);
-    const handle = randomHandle(); // 32 random bytes; deliberately not a hash of anything
     const session = { handle, publicKey, language: language(body.language), createdAt: new Date().toISOString() };
     store.sessions.put(token, session);
-    store.log("session.opened", { handle });
-    return { token, handle, language: session.language, resumed: false };
+    // Cards are sealed to whichever device key most recently proved this code.
+    store.devices.put(handle, { handle, publicKey, updatedAt: new Date().toISOString() });
+    store.log("session.opened", { handle, enrolled: enrol.required });
+    return { token, handle, language: session.language, resumed: false, enrolled: enrol.required };
   });
+
+  route("GET", /^\/api\/enrollment$/, async () => ({ required: enrol.required, demoCodes: enrol.demoCodes }));
 
   route("GET", /^\/api\/me$/, async ({ req }) => {
     const session = requireSession(req);
@@ -236,6 +268,7 @@ function createApp({
       lifetimeCap: LIFETIME_CAP,
       ttlDays: CREDIT_TTL / 86400,
       paused: await ledger.paused(),
+      ledgerMode: ledger.mode,
     };
   });
 
@@ -257,7 +290,7 @@ function createApp({
     if (!m) throw new HttpError(404, "unknown_mission", "unknown mission");
     const attempts = Array.isArray(body.attempts) ? body.attempts.slice(0, 5).map((a) => String(a ?? "").slice(0, 400)) : [];
     const lang = language(body.language ?? session.language);
-    const { feedback, source } = await assessment.coach({ mission: m, attempts, language: lang });
+    const { feedback, source } = await assessment.coach({ mission: m, attempts, language: lang, allowLive: body.allowExternalCoach === true });
     // Coach output is returned, never stored.
     return { feedback, source };
   });
@@ -282,8 +315,6 @@ function createApp({
       outcome: result.outcome,
       criteria: result.criteria,
       missed: result.missed,
-      answers: submission.answers,
-      attempts: submission.attempts,
       at: new Date().toISOString(),
     };
     store.submissions.put(id, record);
@@ -303,7 +334,13 @@ function createApp({
       }
     }
     if (result.outcome === "review") {
-      store.reviewQueue.put(id, { ...record, status: "pending" });
+      store.reviewQueue.put(id, {
+        ...record,
+        status: "pending",
+        answers: submission.answers,
+        attempts: submission.attempts,
+        reviewExpiresAt: new Date(store.now() + store.reviewTtlMs).toISOString(),
+      });
       store.log("mission.review_queued", { handle: session.handle, mission: m.slug, missed: result.missed });
       return { outcome: "review", criteria: result.criteria, missed: result.missed, reviewId: id };
     }
@@ -313,6 +350,7 @@ function createApp({
 
   route("GET", /^\/api\/reviews$/, async ({ req }) => {
     const session = requireSession(req);
+    store.expireReviews();
     const mine = store.reviewQueue.find((r) => r.handle === session.handle).map((r) => ({ id: r.id, missionId: r.missionId, slug: r.slug, status: r.status, at: r.at, decidedAt: r.decidedAt, awarded: r.awarded }));
     return { reviews: mine };
   });
@@ -388,6 +426,7 @@ function createApp({
 
   route("GET", /^\/api\/verifier\/queue$/, async ({ req, url }) => {
     requireRole(req, url, "verifier");
+    store.expireReviews();
     const queue = store.reviewQueue.values().sort((a, b) => (a.at < b.at ? 1 : -1));
     const out = [];
     for (const r of queue) {
@@ -424,13 +463,10 @@ function createApp({
       store.log("verifier.amount_ignored", { review: r.id });
     }
     const m = assessment.getMission(r.missionId);
-    const proofHash = assessment.proofHash(r.handle, m, { answers: r.answers }, randomToken(8));
+    const proofHash = assessment.proofHash(r.handle, m, { answers: r.answers, attempts: r.attempts }, randomToken(8));
     try {
       const award = await ledger.awardCredits("verifier", r.handle, r.missionId, proofHash);
-      r.status = "approved";
-      r.awarded = award.amount;
-      r.decidedAt = new Date().toISOString();
-      store.reviewQueue.put(r.id, r);
+      store.finalizeReview(r.id, "approved", { awarded: award.amount });
       store.log("mission.awarded", { handle: r.handle, mission: r.slug, amount: award.amount, by: "verifier-console", review: r.id });
       return { id: r.id, status: r.status, awarded: award.amount };
     } catch (err) {
@@ -447,9 +483,7 @@ function createApp({
     const r = store.reviewQueue.get(params[0]);
     if (!r) throw new HttpError(404, "no_review", "no such review");
     if (r.status !== "pending") throw new HttpError(409, "decided", "already decided");
-    r.status = "rejected";
-    r.decidedAt = new Date().toISOString();
-    store.reviewQueue.put(r.id, r);
+    store.finalizeReview(r.id, "rejected");
     store.log("mission.review_rejected", { handle: r.handle, mission: r.slug, review: r.id });
     return { id: r.id, status: r.status };
   });
@@ -499,8 +533,13 @@ function createApp({
   route("POST", /^\/api\/admin\/catalog$/, async ({ req, url, body }) => {
     requireRole(req, url, "admin");
     if (!isBytes32(body.itemId)) throw new HttpError(400, "bad_item", "itemId must be bytes32");
-    const known = catalog.get(body.itemId);
-    const product = known ?? { productCode: body.productCode, brand: body.brand, title: body.title, openLoop: body.openLoop, network: body.network };
+    const product = catalog.get(body.itemId);
+    if (!product) {
+      throw new HttpError(422, "unapproved_product", "catalog item must be reviewed and added to the server allowlist before it can be configured");
+    }
+    if (body.productCode !== undefined && body.productCode !== product.productCode) {
+      throw new HttpError(422, "unapproved_product", "productCode does not match the approved catalog item");
+    }
     catalog.assertClosedLoop(product); // the admin console cannot override this
     const current = await ledger.itemOf(body.itemId);
     const cost = body.cost ?? (current.exists ? current.cost : product.cost);
@@ -590,7 +629,7 @@ function createApp({
         }
         return json(res, 404, { error: "not_found" });
       }
-      res.writeHead(200, { "content-type": MIME[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-cache" });
+      res.writeHead(200, { ...SECURITY_HEADERS, "content-type": MIME[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-cache" });
       fs.createReadStream(file).pipe(res);
     });
   }
@@ -631,6 +670,7 @@ function createApp({
     provider,
     swaps,
     seed,
+    enrollment: enrol,
     tokens: { admin: adminToken, verifier: verifierToken },
     listen(port = 0, host = "127.0.0.1") {
       return new Promise((resolve, reject) => {
@@ -662,8 +702,12 @@ if (require.main === module) {
       providerUrl = listening.url;
       console.log(`mock gift card provider  ${providerUrl}   (separate listener)`);
     }
-    const ledger = createLedger();
-    const app = createApp({ ledger, providerUrl });
+    const chosen = createLedger();
+    const { ledger, fellBack, reason } = await verifyLedger(chosen);
+    if (fellBack) console.warn(`chain unreachable, running the demo mirror instead — ${reason}`);
+    const dataFile = process.env.DATA_FILE ?? (ledger.mode === "chain" ? path.join(__dirname, "..", ".data", "state.json") : null);
+    const store = new Store({ file: dataFile });
+    const app = createApp({ ledger, store, providerUrl });
     await app.seed();
     const { url } = await app.listen(port, process.env.HOST ?? "0.0.0.0");
     const base = `http://localhost:${port}`;
@@ -672,7 +716,17 @@ if (require.main === module) {
     console.log(`  verifier console         ${base}/verifier/     token: ${app.tokens.verifier}`);
     console.log(`  admin console            ${base}/admin/        token: ${app.tokens.admin}`);
     console.log(`  public stats             ${base}/api/stats`);
-    console.log(`  coach                    ${assessment.liveCoachAvailable() ? "live (Claude)" : "offline (set ANTHROPIC_API_KEY for live feedback)"}`);
+    console.log(`  ledger                   ${ledger.mode === "chain" ? "on-chain (LanguageCredits)" : "demo mirror (JavaScript ledger — shown as such on every screen)"}`);
+    console.log(
+      `  participation codes      ${
+        app.enrollment.required
+          ? app.enrollment.demoCodes.length
+            ? `${app.enrollment.demoCodes.length} demo codes: ${app.enrollment.demoCodes.slice(0, 3).join(", ")} … ${app.enrollment.demoCodes.at(-1)}`
+            : `${app.enrollment.size} partner-issued codes loaded`
+          : "OPEN — anyone can enrol (ENROLLMENT=open); the lifetime cap is per device, not per person"
+      }`
+    );
+    console.log(`  coach                    ${assessment.liveCoachAvailable() ? "live (learner consent required)" : "offline (set COACH=live plus ANTHROPIC_API_KEY to enable)"}`);
     const shutdown = async () => {
       await app.close();
       if (mock) await mock.close();

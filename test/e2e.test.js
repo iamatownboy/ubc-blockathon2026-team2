@@ -4,6 +4,9 @@
 
 const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 process.env.COACH = "offline"; // the suite must never depend on a network
 
@@ -13,15 +16,27 @@ const { MemoryLedger } = require("../server/ledger");
 const sealing = require("../server/sealing");
 const assessment = require("../server/assessment");
 const catalog = require("../server/catalog");
-const { assertNoPII, PIIRefusedError } = require("../server/store");
+const { Store, assertNoPII, PIIRefusedError } = require("../server/store");
+const { hashParts } = require("../server/ids");
+const { createEnrollment } = require("../server/enrollment");
 
-let mock, app, base, ledger;
+let mock, app, base, ledger, providerBase, enrollment;
+let tempDirs;
+let codeSeq;
+
+/** Plenty of partner-issued codes, so each test learner is a different person. */
+const TEST_CODES = Array.from({ length: 60 }, (_, i) => `TEST-CODE-${String(i).padStart(2, "0")}`);
+const nextCode = () => TEST_CODES[codeSeq++ % TEST_CODES.length];
 
 beforeEach(async () => {
   mock = createMockProvider();
   const provider = await mock.listen(0);
+  providerBase = provider.url;
+  tempDirs = [];
   ledger = new MemoryLedger();
-  app = createApp({ ledger, providerUrl: provider.url, providerTimeoutMs: 400, adminToken: "admin-test", verifierToken: "verifier-test" });
+  codeSeq = 0;
+  enrollment = createEnrollment({ secret: "test-identity-secret", codes: TEST_CODES });
+  app = createApp({ ledger, providerUrl: provider.url, providerTimeoutMs: 400, adminToken: "admin-test", verifierToken: "verifier-test", enrollment });
   await app.seed();
   base = (await app.listen(0)).url;
 });
@@ -29,6 +44,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await app.close();
   await mock.close();
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------- helpers
@@ -38,14 +54,15 @@ async function call(path, { method = "GET", body, token, role } = {}) {
   if (token) headers.authorization = `Bearer ${token}`;
   if (role) headers["x-role-token"] = role === "admin" ? "admin-test" : "verifier-test";
   const res = await fetch(base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-  return { status: res.status, body: await res.json() };
+  return { status: res.status, headers: res.headers, body: await res.json() };
 }
 
 /** A learner: browser-style keypair + session. */
-async function learner(language = "en") {
+async function learner(language = "en", code = null) {
   const keys = sealing.generateLearnerKeypair();
-  const { body } = await call("/api/session", { method: "POST", body: { publicKey: keys.publicJwk, language } });
-  return { ...keys, token: body.token, handle: body.handle };
+  const enrollmentCode = code ?? nextCode();
+  const { body } = await call("/api/session", { method: "POST", body: { publicKey: keys.publicJwk, language, enrollmentCode } });
+  return { ...keys, token: body.token, handle: body.handle, code: enrollmentCode };
 }
 
 const MISSION = assessment.MISSIONS[0];
@@ -65,11 +82,17 @@ const swapFor = (l, item) => call("/api/swap", { method: "POST", token: l.token,
 
 // ---------------------------------------------------------------- identity
 
-test("1. a session opens with a device public key, no sign-up, and the handle is 32 random bytes", async () => {
+test("1. a session opens with no sign-up and the participation code recovers the same private handle", async () => {
   const a = await learner();
   const b = await learner();
   assert.match(a.handle, /^0x[0-9a-f]{64}$/);
   assert.notEqual(a.handle, b.handle);
+  // A brand new device key — a cleared browser, a borrowed phone — with the
+  // same paper code lands back on the same learner.
+  const fresh = sealing.generateLearnerKeypair();
+  const reopened = await call("/api/session", { method: "POST", body: { publicKey: fresh.publicJwk, language: "en", enrollmentCode: a.code } });
+  assert.equal(reopened.body.handle, a.handle);
+  assert.notEqual(reopened.body.token, a.token);
   const { status, body } = await call("/api/me", { token: a.token });
   assert.equal(status, 200);
   assert.equal(body.balance, 0);
@@ -77,6 +100,85 @@ test("1. a session opens with a device public key, no sign-up, and the handle is
   // an e-mail can't even be sent as the key
   const bad = await call("/api/session", { method: "POST", body: { publicKey: "mina@example.com" } });
   assert.equal(bad.status, 400);
+});
+
+test("1b. a cleared browser cannot reset rewards, mission completion or the lifetime cap", async () => {
+  const l = await learner();
+  await pass(l);
+  // "Forget this device" is the attack: wipe the browser, come back new, earn
+  // the same reward again. A fresh device key with the same paper code lands
+  // on the same handle, so there is nothing to reset.
+  const wiped = sealing.generateLearnerKeypair();
+  const reopened = await call("/api/session", { method: "POST", body: { publicKey: wiped.publicJwk, language: "en", enrollmentCode: l.code } });
+  assert.equal(reopened.body.handle, l.handle);
+  assert.equal((await call("/api/me", { token: reopened.body.token })).body.balance, 100);
+  const duplicate = await call("/api/submit", {
+    method: "POST",
+    token: reopened.body.token,
+    body: { missionId: MISSION.missionId, answers: correctAnswers(), attempts: goodAttempts() },
+  });
+  assert.equal(duplicate.body.notAwarded.code, "already_completed");
+});
+
+test("1c. a session needs a partner-issued code, and an unissued one is refused", async () => {
+  const keys = sealing.generateLearnerKeypair();
+  const none = await call("/api/session", { method: "POST", body: { publicKey: keys.publicJwk } });
+  assert.equal(none.status, 403);
+  assert.equal(none.body.error, "enrollment_required");
+  const bogus = await call("/api/session", { method: "POST", body: { publicKey: keys.publicJwk, enrollmentCode: "TEST-CODE-99999" } });
+  assert.equal(bogus.status, 403);
+  assert.equal(bogus.body.error, "enrollment_invalid");
+  // A nervous typist still gets in: case, spaces and dashes do not matter.
+  const typo = await call("/api/session", { method: "POST", body: { publicKey: keys.publicJwk, enrollmentCode: " test code 00 " } });
+  assert.equal(typo.status, 200);
+  assert.equal(typo.body.handle, (await call("/api/session", { method: "POST", body: { publicKey: keys.publicJwk, enrollmentCode: "TEST-CODE-00" } })).body.handle);
+});
+
+test("1d. wiping the browser after a swap does not buy a second card on the same code", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  assert.equal((await swapFor(l, item)).body.status, "Settled");
+  assert.equal((await call("/api/me", { token: l.token })).body.balance, 0);
+
+  // The learner clears the site data and starts over with the same paper code.
+  const wiped = sealing.generateLearnerKeypair();
+  const again = await call("/api/session", { method: "POST", body: { publicKey: wiped.publicJwk, enrollmentCode: l.code } });
+  const token = again.body.token;
+  const me = (await call("/api/me", { token })).body;
+  assert.equal(again.body.handle, l.handle);
+  assert.equal(me.balance, 0);
+  assert.equal(me.lifetimeAwarded, 100); // the cap followed the person, not the browser
+  const redo = await call("/api/submit", { method: "POST", token, body: { missionId: MISSION.missionId, answers: correctAnswers(), attempts: goodAttempts() } });
+  assert.equal(redo.body.notAwarded.code, "already_completed");
+  assert.equal((await call("/api/me", { token })).body.balance, 0);
+});
+
+test("1e. the participation code itself is never stored or logged", async () => {
+  const l = await learner();
+  const dumped = JSON.stringify(app.store.dump());
+  assert.ok(!dumped.includes(l.code), "the code must not appear anywhere in the store");
+  assert.ok(dumped.includes(l.handle), "the one-way handle is what is kept");
+  const { body } = await call("/api/enrollment");
+  assert.equal(body.required, true);
+  assert.deepEqual(body.demoCodes, []); // an explicit code list is never echoed back
+});
+
+test("1f. the ledger mode is reported to the learner, so a mirror run is never shown as on-chain", async () => {
+  const l = await learner();
+  assert.equal((await call("/api/me", { token: l.token })).body.ledgerMode, "memory");
+});
+
+test("1g. a production deployment cannot fall back to the demo code list", async () => {
+  assert.throws(
+    () => createEnrollment({ secret: "s", production: true }),
+    /ENROLLMENT_CODES/,
+    "production with no partner code list must refuse to start"
+  );
+  const open = createEnrollment({ secret: "s", mode: "open", production: true });
+  assert.equal(open.required, false); // an explicit, documented opt-out
+  const demo = createEnrollment({ secret: "s", production: false });
+  assert.ok(demo.demoCodes.length > 0 && demo.required);
 });
 
 test("2. the store refuses to write a name, e-mail, phone, address or device id", async () => {
@@ -140,6 +242,9 @@ test("6. a passed mission pays the configured 100 credits, once", async () => {
   assert.equal((await call("/api/me", { token: l.token })).body.balance, 100);
   const missions = (await call("/api/missions", { token: l.token })).body.missions;
   assert.equal(missions.find((m) => m.missionId === MISSION.missionId).completed, true);
+  const stored = app.store.submissions.values();
+  assert.ok(stored.length >= 1);
+  assert.equal(stored.some((row) => "answers" in row || "attempts" in row), false);
 });
 
 test("7. a near miss goes to the review queue with the criterion it missed", async () => {
@@ -163,6 +268,10 @@ test("8. the verifier console awards the configured amount and ignores an amount
   assert.equal(approve.body.awarded, 100);
   assert.equal((await call("/api/me", { token: l.token })).body.balance, 100);
   assert.ok(app.store.logEntries.some((e) => e.event === "verifier.amount_ignored"));
+  const decided = app.store.reviewQueue.get(body.reviewId);
+  assert.equal(decided.status, "approved");
+  assert.equal("answers" in decided, false);
+  assert.equal("attempts" in decided, false);
   const twice = await call(`/api/verifier/queue/${body.reviewId}/approve`, { method: "POST", role: "verifier" });
   assert.equal(twice.status, 409);
 });
@@ -175,6 +284,7 @@ test("9. the verifier can reject, and the consoles are token-gated", async () =>
   assert.equal((await call("/api/verifier/queue", { role: "admin" })).status, 401); // the admin token is not a verifier token
   const reject = await call(`/api/verifier/queue/${body.reviewId}/reject`, { method: "POST", role: "verifier" });
   assert.equal(reject.body.status, "rejected");
+  assert.equal("attempts" in app.store.reviewQueue.get(body.reviewId), false);
   assert.equal((await call("/api/me", { token: l.token })).body.balance, 0);
 });
 
@@ -209,7 +319,51 @@ test("12. an open-loop product is refused — by the catalog rule and by the adm
   }
   const res = await call("/api/admin/catalog", { method: "POST", role: "admin", body: { itemId: "0x" + "ab".repeat(32), productCode: "VISA-CA-2500", brand: "Visa Prepaid", cost: 500, inventory: 10, active: true } });
   assert.equal(res.status, 422);
-  assert.equal(res.body.error, "open_loop_refused");
+  assert.equal(res.body.error, "unapproved_product");
+});
+
+test("12b. the admin cannot substitute a product code on an approved item", async () => {
+  const item = await catalogItem();
+  const res = await call("/api/admin/catalog", {
+    method: "POST",
+    role: "admin",
+    body: { itemId: item.itemId, productCode: "OTHER-BRAND-0500", inventory: 10 },
+  });
+  assert.equal(res.status, 422);
+  assert.equal(res.body.error, "unapproved_product");
+});
+
+test("12c. API responses carry browser security headers", async () => {
+  const res = await call("/api/catalog");
+  assert.match(res.headers.get("content-security-policy"), /frame-ancestors 'none'/);
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(res.headers.get("x-frame-options"), "DENY");
+});
+
+test("12d. abandoned review text expires and is removed", async () => {
+  const l = await learner();
+  const submitted = await call("/api/submit", {
+    method: "POST",
+    token: l.token,
+    body: { missionId: MISSION.missionId, answers: correctAnswers(), attempts: ["Hi! Is there an English group?"] },
+  });
+  const row = app.store.reviewQueue.get(submitted.body.reviewId);
+  row.reviewExpiresAt = new Date(Date.now() - 1000).toISOString();
+  app.store.reviewQueue.put(row.id, row);
+  await call("/api/verifier/queue", { role: "verifier" });
+  const expired = app.store.reviewQueue.get(row.id);
+  assert.equal(expired.status, "expired");
+  assert.equal("answers" in expired, false);
+  assert.equal("attempts" in expired, false);
+});
+
+test("12e. proof commitments bind the graded attempts and canonical answers", () => {
+  const nonce = "fixed-nonce";
+  const a = assessment.proofHash("learner", MISSION, { answers: { b: 2, a: 1 }, attempts: ["one"] }, nonce);
+  const reordered = assessment.proofHash("learner", MISSION, { answers: { a: 1, b: 2 }, attempts: ["one"] }, nonce);
+  const changedAttempt = assessment.proofHash("learner", MISSION, { answers: { a: 1, b: 2 }, attempts: ["two"] }, nonce);
+  assert.equal(a, reordered);
+  assert.notEqual(a, changedAttempt);
 });
 
 // ---------------------------------------------------------------- swap
@@ -325,6 +479,74 @@ test("19. a ghosted order is recovered rather than re-ordered: one order, one ca
   const card = sealing.open(body.sealed, l.privateKey);
   assert.equal((await app.provider.balance(card.cardnbr)).balance, 5);
   assert.ok(app.store.logEntries.some((e) => e.event === "swap.recovered"));
+});
+
+test("19b. a provider-issued card is recovered after an app restart without a second order", async () => {
+  await app.close();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "languagetoken-recovery-"));
+  tempDirs.push(dir);
+  const stateFile = path.join(dir, "state.json");
+  app = createApp({
+    ledger,
+    store: new Store({ file: stateFile }),
+    providerUrl: providerBase,
+    providerTimeoutMs: 400,
+    adminToken: "admin-test",
+    verifierToken: "verifier-test",
+    enrollment,
+  });
+  await app.seed();
+  base = (await app.listen(0)).url;
+
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  const requestHash = hashParts("restart-test", l.handle, item.itemId);
+  const swapId = await ledger.requestSwap("redeemer", l.handle, item.itemId, requestHash);
+  app.store.swaps.put(swapId, {
+    swapId,
+    handle: l.handle,
+    itemId: item.itemId,
+    slug: item.slug,
+    brand: item.brand,
+    icon: item.icon,
+    productCode: item.productCode,
+    valueCad: item.valueCad,
+    cost: item.cost,
+    requestHash,
+    status: "Requested",
+    sealed: null,
+    last4: null,
+    orderRef: null,
+    recovered: false,
+    reveals: 0,
+    createdAt: new Date().toISOString(),
+  });
+  await app.provider.order({ productCode: item.productCode, requestId: requestHash });
+  assert.equal(mock.state.orders.size, 1);
+
+  await app.close();
+  app = createApp({
+    ledger,
+    store: new Store({ file: stateFile }),
+    providerUrl: providerBase,
+    providerTimeoutMs: 400,
+    adminToken: "admin-test",
+    verifierToken: "verifier-test",
+    enrollment,
+  });
+  await app.seed();
+  base = (await app.listen(0)).url;
+
+  const resumed = await call("/api/session", { method: "POST", body: { publicKey: l.publicJwk, language: "en", enrollmentCode: l.code } });
+  assert.equal(resumed.body.handle, l.handle);
+  const wallet = (await call("/api/wallet", { token: resumed.body.token })).body.cards;
+  assert.equal(wallet.length, 1);
+  assert.equal(wallet[0].status, "Settled");
+  assert.equal(wallet[0].recovered, true);
+  assert.equal(mock.state.orders.size, 1);
+  assert.equal(mock.state.cards.size, 1);
+  assert.equal(sealing.open(wallet[0].sealed, l.privateKey).orderRef, wallet[0].orderRef);
 });
 
 // ---------------------------------------------------------------- pause & errors

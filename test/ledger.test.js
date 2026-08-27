@@ -4,7 +4,7 @@
 
 const { test, beforeEach } = require("node:test");
 const assert = require("node:assert/strict");
-const { MemoryLedger, ROLES, MAX_MISSION_REWARD, LIFETIME_CAP, CREDIT_TTL } = require("../server/ledger");
+const { MemoryLedger, ROLES, MAX_MISSION_REWARD, LIFETIME_CAP, CREDIT_TTL, REFUND_GRACE_PERIOD } = require("../server/ledger");
 const { bytes32, reasonBytes32, reasonFromBytes32 } = require("../server/ids");
 
 const LEARNER = bytes32("learner:mina");
@@ -219,6 +219,21 @@ test("21. the admin may cancel a stuck swap (refund path without the fulfiller k
   const id = await swap();
   await ledger.cancelSwap("admin", id, reasonBytes32("admin:stuck"));
   assert.equal(await ledger.balanceOf(LEARNER), REWARD);
+});
+
+test("21b. a refund after expiry remains usable and expires only the unrelated balance", async () => {
+  await award(LEARNER, MISSION);
+  await award(LEARNER, MISSION_2);
+  const id = await swap(); // 100 remains in the account, 100 is in the swap
+  clock += CREDIT_TTL;
+  await ledger.cancelSwap("fulfiller", id, reasonBytes32("late:refund"));
+  assert.equal(await ledger.balanceOf(LEARNER), COST);
+  assert.equal((await ledger.accountOf(LEARNER)).expiresAt, clock + REFUND_GRACE_PERIOD);
+  const stats = await ledger.stats();
+  assert.deepEqual(
+    { awarded: stats.awarded, outstanding: stats.outstanding, inSwap: stats.inSwap, expired: stats.expired },
+    { awarded: 200, outstanding: 100, inSwap: 0, expired: 100 }
+  );
 });
 
 // ---------------------------------------------------------------- expiry

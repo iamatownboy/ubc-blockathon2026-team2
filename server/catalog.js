@@ -103,18 +103,9 @@ function syncFromProvider(providerProducts) {
   const accepted = [];
   for (const p of providerProducts) {
     assertClosedLoop(p);
-    accepted.push({
-      itemId: bytes32(`item:${p.productCode.toLowerCase()}`),
-      slug: p.productCode.toLowerCase(),
-      brand: p.brand,
-      title: `${p.brand} — CAD ${p.valueCad} gift card`,
-      productCode: p.productCode,
-      valueCad: p.valueCad,
-      cost: creditCost(p.valueCad),
-      inventory: 0,
-      active: false,
-      closedLoop: true,
-    });
+    const approved = getByProductCode(p.productCode);
+    if (!approved) continue; // provider presence is not programme approval
+    accepted.push({ ...approved, inventory: 0, active: false });
   }
   return accepted;
 }
