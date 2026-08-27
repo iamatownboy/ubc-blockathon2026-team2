@@ -354,6 +354,7 @@ class ChainLedger {
     this.provider = new ethers.JsonRpcProvider(this.deployment.rpcUrl, undefined, { cacheTimeout: -1 });
     this.keys = keys;
     this.wallets = new Map();
+    this.nonces = new Map();
     this.addresses = new Map();
     this.contract = new ethers.Contract(this.deployment.address, this.deployment.abi, this.provider);
     this.listeners = new Set();
@@ -373,8 +374,12 @@ class ChainLedger {
       const key = this.keys[actor] ?? this.keys.stranger;
       const wallet = new this.ethers.Wallet(key, this.provider);
       this.addresses.set(actor, wallet.address);
-      // NonceManager tracks nonces locally so back-to-back sends never reuse one.
-      this.wallets.set(actor, this.contract.connect(new this.ethers.NonceManager(wallet)));
+      // NonceManager tracks nonces locally so back-to-back sends never reuse
+      // one. It counts optimistically, so a *rejected* send still burns a
+      // local nonce — see _send, which resets it on failure.
+      const nonces = new this.ethers.NonceManager(wallet);
+      this.nonces.set(actor, nonces);
+      this.wallets.set(actor, this.contract.connect(nonces));
     }
     return this.wallets.get(actor);
   }
@@ -424,6 +429,16 @@ class ChainLedger {
       }
       return receipt;
     } catch (err) {
+      // A revert is a normal outcome here — a learner repeats a mission, a
+      // swap is short of credits. The local nonce counter has already moved,
+      // though, so without this reset the *next* call from the same role key
+      // fails with "Nonce too high" and that key is dead for the rest of the
+      // run. The parity suite is what found this.
+      try {
+        this.nonces.get(actor)?.reset();
+      } catch {
+        /* the reset is best effort; the original failure is what matters */
+      }
       throw this._translate(err);
     }
   }
@@ -593,14 +608,31 @@ function createLedger(env = process.env) {
  * file with a dead RPC behind it is exactly the situation where a silent
  * fallback is better than a crash — and a loud badge is better than both.
  */
-async function verifyLedger(ledger, env = process.env) {
+async function verifyLedger(ledger, env = process.env, timeoutMs = Number(env.CHAIN_PROBE_MS ?? 4000)) {
   if (ledger.mode !== "chain") return { ledger, fellBack: false };
+  let timer;
   try {
-    await ledger.stats();
+    // Bounded on purpose. An RPC host that accepts the connection and then
+    // says nothing would otherwise hang startup forever, which is worse than
+    // falling back — the demo would simply never come up.
+    await Promise.race([
+      ledger.stats(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`no answer from ${ledger.deployment?.rpcUrl} within ${timeoutMs}ms`)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
     return { ledger, fellBack: false };
   } catch (err) {
     if (env.LEDGER === "chain") throw err; // asked for the chain explicitly
+    try {
+      ledger.provider?.destroy?.();
+    } catch {
+      /* nothing left to close */
+    }
     return { ledger: new MemoryLedger(), fellBack: true, reason: String(err?.message ?? err).slice(0, 160) };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

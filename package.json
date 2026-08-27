@@ -8,9 +8,10 @@
     "start": "node server/server.js",
     "start:chain": "LEDGER=chain node server/server.js",
     "provider": "node server/bhn-mock.js",
-    "test": "node --test test/ledger.test.js test/e2e.test.js",
+    "test": "node --test test/ledger.test.js test/e2e.test.js test/parity.test.js",
     "test:ledger": "node --test test/ledger.test.js",
     "test:e2e": "node --test test/e2e.test.js",
+    "test:parity": "node --test test/parity.test.js",
     "test:contract": "npm --prefix contracts test"
   },
   "engines": {
