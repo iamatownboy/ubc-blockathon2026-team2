@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LanguageToken — Verifier console</title>
+<link rel="stylesheet" href="/common.css">
+<style>
+  .review { border-left: 4px solid var(--amber); }
+  .review.decided { opacity: .6; border-left-color: var(--line); }
+  .crit { display: flex; gap: .4rem; align-items: center; font-size: .9rem; }
+  .attempt { background: var(--surface-2); border-radius: 8px; padding: .4rem .6rem; font-size: .92rem; margin-top: .3rem; }
+  .answer { font-size: .88rem; color: var(--ink-2); margin-top: .25rem; }
+  .token { display: flex; gap: .5rem; align-items: center; }
+  .token input { width: 14rem; }
+</style>
+</head>
+<body>
+<div class="console">
+  <header>
+    <div>
+      <div class="brand"><span class="leaf">🍁</span> Verifier console</div>
+      <div class="tiny">Submissions that fell short of the fixed criteria, each shown with the criteria it missed. Approving awards the mission's configured amount — there is no field to type an amount into.</div>
+    </div>
+    <div class="token"><label class="tiny" for="token">Verifier token</label><input id="token" placeholder="verifier-demo"><span id="conn" class="badge"></span></div>
+  </header>
+  <div class="row" style="margin-bottom:.75rem"><div class="stat"><b id="n-pending">–</b><span>pending</span></div><div class="stat"><b id="n-decided">–</b><span>decided</span></div><div class="grow"></div><button class="btn-sm" id="refresh">Refresh</button></div>
+  <div id="queue" class="stack"><p class="muted">Loading…</p></div>
+</div>
+<script src="/verifier/app.js"></script>
+</body>
+</html>

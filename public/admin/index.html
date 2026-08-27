@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LanguageToken — Admin console</title>
+<link rel="stylesheet" href="/common.css">
+<style>
+  .token { display: flex; gap: .5rem; align-items: center; }
+  .token input { width: 12rem; }
+  .modes button { margin: .15rem .2rem .15rem 0; }
+  .modes button.armed { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .stats { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .pill-on { color: var(--green); font-weight: 700; }
+  .pill-off { color: var(--ink-3); }
+</style>
+</head>
+<body>
+<div class="console">
+  <header>
+    <div>
+      <div class="brand"><span class="leaf">🍁</span> Admin console</div>
+      <div class="tiny">Every action on this page is a role-gated ledger call. The limits (max reward, lifetime cap, expiry) are constants this console cannot raise.</div>
+    </div>
+    <div class="token"><label class="tiny" for="token">Admin token</label><input id="token" placeholder="admin-demo"><span id="conn" class="badge"></span></div>
+  </header>
+
+  <div class="card" style="margin-bottom:1rem">
+    <div class="row between wrap">
+      <div class="stats" id="stats"></div>
+      <div class="row"><span id="paused" class="badge"></span><button id="pause" class="btn-danger btn-sm">Pause</button><button id="unpause" class="btn-sm">Unpause</button></div>
+    </div>
+    <div class="tiny" id="limits" style="margin-top:.5rem"></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Provider failure switches <span class="badge" id="provider-mode"></span></h2>
+      <p class="tiny">Arm one, then run a swap in the learner app. <b>error</b>: 502 → refund. <b>timeout</b>: no answer, no card → lookup finds nothing → refund. <b>ghost</b>: card issued, response dropped → lookup finds it → one card, one order, one unit of stock.</p>
+      <div class="modes" id="modes"></div>
+      <label class="tiny"><input type="checkbox" id="once" checked style="width:auto"> one-shot (revert to normal after the next order)</label>
+      <div class="tiny" style="margin-top:.6rem">Provider log</div>
+      <div class="log" id="provider-log" style="max-height:12rem"></div>
+    </div>
+
+    <div class="card">
+      <h2>Roles</h2>
+      <table id="roles"><thead><tr><th>Role</th><th>Held by</th><th>Can do</th></tr></thead><tbody></tbody></table>
+      <p class="tiny">Opening and settling a swap are separate roles on purpose: one stolen credential cannot both burn a learner's credits and declare them settled. Pause blocks earning and swapping but still allows cancellation.</p>
+    </div>
+
+    <div class="card span-2">
+      <h2>Missions</h2>
+      <p class="tiny">The verifier can only award what is configured here, and never more than the constant ceiling. Bumping the version lets learners complete the revised mission again.</p>
+      <div class="table-wrap"><table id="missions"><thead><tr><th>Mission</th><th>Reward</th><th>Version</th><th>Active</th><th></th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div class="card span-2">
+      <h2>Catalog</h2>
+      <p class="tiny">productCode is the provider's own identifier. Inventory is stock a sponsor has already funded. Open-loop products cannot be listed — the rule runs before this console does.</p>
+      <div class="table-wrap"><table id="catalog"><thead><tr><th>Item</th><th>Product code</th><th>Cost</th><th>Stock</th><th>Active</th><th></th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div class="card span-2">
+      <h2>Swaps</h2>
+      <div class="table-wrap"><table id="swaps"><thead><tr><th>#</th><th>Status</th><th>Item</th><th>Cost</th><th>Card</th><th>Order</th><th>Reveals</th><th>Note</th><th></th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div class="card">
+      <h2>Ledger events <span class="badge" id="ledger-mode"></span></h2>
+      <p class="tiny">Live. Every field is a hash, a number or a flag — nothing here can carry a name.</p>
+      <div class="log" id="events"></div>
+    </div>
+
+    <div class="card">
+      <h2>Service log</h2>
+      <p class="tiny">Live. The store refuses to write a name, e-mail, phone, address, device id, card number or PIN.</p>
+      <div class="log" id="service-log"></div>
+    </div>
+  </div>
+</div>
+<script src="/admin/app.js"></script>
+</body>
+</html>

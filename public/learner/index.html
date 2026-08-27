@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#b8402f">
+<title>LanguageToken</title>
+<link rel="stylesheet" href="/common.css">
+<style>
+  body { background: #e9e4da; }
+  .phone { max-width: 430px; min-height: 100dvh; margin: 0 auto; background: var(--bg); display: flex; flex-direction: column; position: relative; }
+  @media (min-width: 480px) { .phone { min-height: calc(100dvh - 2rem); margin: 1rem auto; border-radius: 28px; box-shadow: 0 20px 60px rgba(0,0,0,.18); overflow: hidden; border: 1px solid #d8d2c6; } }
+  .top { display: flex; align-items: center; justify-content: space-between; padding: .9rem 1rem .4rem; }
+  .top select { width: auto; padding: .3rem .5rem; font-size: .8rem; border-radius: 8px; }
+  main { flex: 1; padding: .5rem 1rem 6rem; }
+  nav.bottom { position: sticky; bottom: 0; display: grid; grid-template-columns: repeat(3, 1fr); background: var(--surface); border-top: 1px solid var(--line); padding: .35rem .5rem calc(.35rem + env(safe-area-inset-bottom)); }
+  nav.bottom button { border: 0; background: transparent; font-weight: 600; font-size: .78rem; color: var(--ink-3); display: flex; flex-direction: column; align-items: center; gap: .1rem; padding: .35rem 0; }
+  nav.bottom button .ic { font-size: 1.25rem; }
+  nav.bottom button.active { color: var(--accent); }
+  .balance { background: linear-gradient(135deg, #b8402f, #d9603f); color: #fff; border-radius: 18px; padding: 1rem 1.1rem; box-shadow: var(--shadow); }
+  .balance .n { font-size: 2.4rem; font-weight: 800; letter-spacing: -.03em; line-height: 1; }
+  .balance .sub { opacity: .9; font-size: .85rem; margin-top: .3rem; }
+  .mission { display: flex; gap: .8rem; align-items: center; cursor: pointer; }
+  .mission .ic { font-size: 1.7rem; width: 2.6rem; height: 2.6rem; display: grid; place-items: center; background: var(--surface-2); border-radius: 12px; }
+  .mission h3 { margin: 0; font-size: .98rem; }
+  .mission .meta { font-size: .78rem; color: var(--ink-3); }
+  .mission.done { opacity: .65; }
+  .step { display: flex; gap: .5rem; align-items: center; font-size: .75rem; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: .5rem; }
+  .step b { color: var(--accent); }
+  .prompt label { display: block; font-size: .88rem; margin-bottom: .3rem; color: var(--ink-2); }
+  .corr { border-left: 3px solid var(--accent); padding: .3rem .7rem; margin: .5rem 0; }
+  .corr .orig { color: var(--ink-3); text-decoration: line-through; font-size: .88rem; }
+  .corr .better { font-weight: 700; }
+  .corr .why { font-size: .88rem; color: var(--ink-2); }
+  .choice { display: flex; gap: .6rem; align-items: flex-start; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 10px; margin-top: .4rem; cursor: pointer; background: var(--surface); }
+  .choice input { width: auto; margin-top: .25rem; }
+  .choice.sel { border-color: var(--accent); background: var(--accent-soft); }
+  .crit { display: flex; gap: .5rem; align-items: center; font-size: .9rem; padding: .25rem 0; }
+  .crit .mark { width: 1.3rem; text-align: center; }
+  .big { font-size: 3rem; text-align: center; margin: .5rem 0 0; }
+  .item { display: flex; gap: .8rem; align-items: center; }
+  .item .ic { font-size: 1.6rem; width: 2.6rem; height: 2.6rem; display: grid; place-items: center; background: var(--surface-2); border-radius: 12px; }
+  .item h3 { margin: 0; font-size: .98rem; }
+  .item .grow { min-width: 0; }
+  .item .badge, .item button { flex-shrink: 0; white-space: nowrap; }
+  .item .meta { font-size: .78rem; color: var(--ink-3); }
+  .gift { border-radius: 16px; padding: 1rem; color: #fff; background: linear-gradient(135deg, #2b2b2b, #4a4a4a); box-shadow: var(--shadow); }
+  .gift.tim { background: linear-gradient(135deg, #c8102e, #8b0a1f); }
+  .gift.saveon { background: linear-gradient(135deg, #0b6b3a, #094d2a); }
+  .gift.translink { background: linear-gradient(135deg, #1f4e9c, #16376d); }
+  .gift.maple { background: linear-gradient(135deg, #b8402f, #7a2a1f); }
+  .gift .brand-line { display: flex; justify-content: space-between; align-items: center; font-weight: 800; }
+  .gift .num { font-family: var(--mono); font-size: 1.15rem; letter-spacing: .12em; margin: .8rem 0 .3rem; }
+  .gift .meta { display: flex; gap: 1rem; font-size: .8rem; opacity: .9; }
+  .gift .tag { font-size: .7rem; opacity: .85; margin-top: .5rem; }
+  .gift + .gift { margin-top: .75rem; }
+  .overlay { position: absolute; inset: 0; background: rgba(28,26,23,.45); display: flex; align-items: flex-end; z-index: 5; }
+  .sheet { background: var(--surface); width: 100%; border-radius: 20px 20px 0 0; padding: 1.2rem 1rem calc(1.2rem + env(safe-area-inset-bottom)); }
+  .toast { position: absolute; left: 1rem; right: 1rem; bottom: 5rem; z-index: 6; }
+</style>
+</head>
+<body>
+<div class="phone" id="phone">
+  <div class="top">
+    <div class="brand"><span class="leaf">🍁</span> LanguageToken</div>
+    <select id="lang" aria-label="Language"></select>
+  </div>
+  <main id="app"><p class="muted" style="padding:2rem 0;text-align:center"><span class="spinner"></span></p></main>
+  <nav class="bottom" id="nav"></nav>
+  <div id="toast" class="toast hidden"></div>
+</div>
+<script src="/learner/i18n.js"></script>
+<script src="/learner/crypto.js"></script>
+<script src="/learner/app.js"></script>
+</body>
+</html>

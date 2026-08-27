@@ -1,0 +1,22 @@
+{
+  "name": "languagetoken",
+  "version": "0.2.0",
+  "private": true,
+  "description": "LanguageToken — learn local, earn local, belong local. Blockathon for Social Good 2026.",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "start:chain": "LEDGER=chain node server/server.js",
+    "provider": "node server/bhn-mock.js",
+    "test": "node --test test/ledger.test.js test/e2e.test.js",
+    "test:ledger": "node --test test/ledger.test.js",
+    "test:e2e": "node --test test/e2e.test.js",
+    "test:contract": "npm --prefix contracts test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.121.0"
+  }
+}
