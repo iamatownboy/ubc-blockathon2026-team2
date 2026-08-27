@@ -16,7 +16,7 @@ const { ethers } = require("hardhat");
 
 const assessment = require("../../server/assessment");
 const catalog = require("../../server/catalog");
-const { hashParts } = require("../../server/ids");
+const { asciiBytes32 } = require("../../server/ids");
 
 async function main() {
   const [admin, verifier, redeemer, fulfiller] = await ethers.getSigners();
@@ -41,10 +41,10 @@ async function main() {
     console.log(`mission ${m.slug}: ${m.reward} credits, v${m.version}`);
   }
 
-  // --- catalog (closed-loop only; productCode is the provider's own id) --
+  // --- catalog (closed-loop only; productCode goes on chain as the provider's own literal id) --
   for (const item of catalog.all()) {
     catalog.assertClosedLoop(item);
-    await (await contract.configureCatalogItem(item.itemId, hashParts("product", item.productCode), item.cost, item.inventory, true)).wait();
+    await (await contract.configureCatalogItem(item.itemId, asciiBytes32(item.productCode), item.cost, item.inventory, true)).wait();
     console.log(`item ${item.slug}: ${item.productCode}, ${item.cost} credits, stock ${item.inventory}`);
   }
 

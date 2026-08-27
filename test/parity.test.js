@@ -119,6 +119,9 @@ async function observe(ledger, ctx, label, error) {
     // block timestamps and Date.now() differ by seconds; the TTL must not
     expiresInDays: account.expiresAt ? Math.round((account.expiresAt - ctx.startedAt) / 86400) : 0,
     stockUsed: ctx.stockAtStart - item.inventory,
+    // The chain and the mirror must agree on how a productCode is encoded —
+    // a hash on one side and packed ASCII on the other is a silent divergence.
+    productCode: item.productCode,
     lastSwap: swap === undefined ? null : (await ledger.swapOf(swap)).status,
     swapsOpened: (await ledger.swapCount()) - ctx.swapsAtStart,
     awardedDelta: totals.awarded - ctx.totalsAtStart.awarded,

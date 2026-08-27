@@ -23,6 +23,9 @@ const PRODUCTS = [
   { productCode: "SAVEON-CA-1000", brand: "Save-On-Foods", valueCad: 10, currency: "CAD", closedLoop: true },
   { productCode: "TRANSLINK-CA-1000", brand: "TransLink", valueCad: 10, currency: "CAD", closedLoop: true },
   { productCode: "MAPLECAFE-CA-0500", brand: "Maple Café", valueCad: 5, currency: "CAD", closedLoop: true },
+  // Closed loop, and still not ours: a provider sells plenty the programme has
+  // never reviewed. It syncs as listed:false and cannot be configured.
+  { productCode: "PETROCAN-CA-2500", brand: "Petro-Canada", valueCad: 25, currency: "CAD", closedLoop: true },
   // A real provider catalog also carries these. Our catalog must refuse it.
   { productCode: "VISA-CA-2500", brand: "Visa Prepaid", valueCad: 25, currency: "CAD", openLoop: true, network: "VISA" },
 ];

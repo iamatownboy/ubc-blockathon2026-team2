@@ -22,7 +22,15 @@
     return data;
   }
 
-  const fmt = (v) => (typeof v === "string" && /^0x[0-9a-f]{64}$/i.test(v) ? v.slice(0, 10) + "…" : typeof v === "object" ? JSON.stringify(v) : String(v));
+  // A bytes32 that is really a short ASCII string (productCode, cancel reason) is shown as text.
+  const asciiOf = (hex) => {
+    const bytes = hex.slice(2).match(/../g).map((h) => parseInt(h, 16));
+    const end = bytes.indexOf(0);
+    const body = end === -1 ? bytes : bytes.slice(0, end);
+    if (!body.length || bytes.slice(body.length).some((b) => b !== 0) || body.some((b) => b < 0x20 || b > 0x7e)) return null;
+    return String.fromCharCode(...body);
+  };
+  const fmt = (v) => (typeof v === "string" && /^0x[0-9a-f]{64}$/i.test(v) ? asciiOf(v) ?? v.slice(0, 10) + "…" : typeof v === "object" ? JSON.stringify(v) : String(v));
   const line = (cls, text) => {
     const el = document.createElement("div");
     el.className = `line ${cls}`;
@@ -137,6 +145,15 @@
   };
 
   $("pause").onclick = guard(() => api("/api/admin/pause", "POST", {}));
+  $("sync").onclick = guard(async () => {
+    const r = await api("/api/admin/catalog/sync", "POST", {});
+    const listed = r.accepted.filter((p) => p.listed);
+    const unlisted = r.accepted.filter((p) => !p.listed);
+    $("sync-result").innerHTML =
+      `fetched ${r.fetched} · on our list ${listed.length}` +
+      `${unlisted.length ? ` · <b>not approved ${unlisted.length}</b>${unlisted.map((x) => ` — ${esc(x.productCode)}`).join("")}` : ""}` +
+      ` · <b style="color:var(--accent)">refused ${r.refused.length}</b>${r.refused.map((x) => ` — ${esc(x.productCode)} (${esc(x.brand)}): open loop`).join("")}`;
+  });
   $("unpause").onclick = guard(() => api("/api/admin/unpause", "POST", {}));
   $("modes").addEventListener("click", guard(async (e) => {
     const b = e.target.closest("[data-mode]");

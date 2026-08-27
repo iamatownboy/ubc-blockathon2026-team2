@@ -95,19 +95,44 @@ function getByProductCode(code) {
 }
 
 /**
- * Accept products from the provider's catalog into ours. Each one goes
- * through assertClosedLoop — an open-loop product anywhere in the list
- * rejects the whole sync, so a partial import cannot slip one in.
+ * Accept products from the provider's catalog into ours. Every product goes
+ * through assertClosedLoop; the ones that fail are returned as refused, with
+ * the reason, so an open-loop card can never slip in — and the admin console
+ * can show exactly what was turned away.
  */
 function syncFromProvider(providerProducts) {
   const accepted = [];
+  const refused = [];
   for (const p of providerProducts) {
-    assertClosedLoop(p);
-    const approved = getByProductCode(p.productCode);
-    if (!approved) continue; // provider presence is not programme approval
-    accepted.push({ ...approved, inventory: 0, active: false });
+    try {
+      assertClosedLoop(p);
+    } catch (err) {
+      refused.push({ productCode: p.productCode, brand: p.brand, reason: err.message });
+      continue;
+    }
+    // Being in the provider's catalog is not programme approval: an unknown
+    // product comes back listed:false and still cannot be configured — the
+    // admin route refuses anything that is not on the server's allowlist.
+    const known = byProductCode.get(p.productCode);
+    accepted.push(
+      known
+        ? { ...known, listed: true }
+        : {
+            itemId: bytes32(`item:${p.productCode.toLowerCase()}`),
+            slug: p.productCode.toLowerCase(),
+            brand: p.brand,
+            title: `${p.brand} — CAD ${p.valueCad} gift card`,
+            productCode: p.productCode,
+            valueCad: p.valueCad,
+            cost: creditCost(p.valueCad),
+            inventory: 0,
+            active: false,
+            closedLoop: true,
+            listed: false,
+          }
+    );
   }
-  return accepted;
+  return { accepted, refused };
 }
 
 module.exports = {

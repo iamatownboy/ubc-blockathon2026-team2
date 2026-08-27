@@ -30,7 +30,7 @@ const { createMockProvider } = require("./bhn-mock");
 const { createSwapService, plainError } = require("./swap");
 const assessment = require("./assessment");
 const catalog = require("./catalog");
-const { handleForPublicKey, randomToken, hashParts, isBytes32 } = require("./ids");
+const { handleForPublicKey, randomToken, asciiBytes32, isBytes32 } = require("./ids");
 const { createEnrollment } = require("./enrollment");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
@@ -118,7 +118,7 @@ function createApp({
       for (const item of catalog.all()) {
         const current = await ledger.itemOf(item.itemId);
         if (!current.exists) {
-          await ledger.configureCatalogItem("admin", item.itemId, hashParts("product", item.productCode), item.cost, item.inventory, true);
+          await ledger.configureCatalogItem("admin", item.itemId, asciiBytes32(item.productCode), item.cost, item.inventory, true);
         }
       }
     }
@@ -547,9 +547,19 @@ function createApp({
     const cost = body.cost ?? (current.exists ? current.cost : product.cost);
     const inventory = body.inventory ?? current.inventory;
     const active = body.active ?? current.active;
-    await ledger.configureCatalogItem("admin", body.itemId, hashParts("product", product.productCode), cost, inventory, active);
+    await ledger.configureCatalogItem("admin", body.itemId, asciiBytes32(product.productCode), cost, inventory, active);
     store.log("admin.catalog_configured", { itemId: body.itemId, productCode: product.productCode, cost, inventory, active });
     return { item: await ledger.itemOf(body.itemId) };
+  });
+
+  route("POST", /^\/api\/admin\/catalog\/sync$/, async ({ req, url }) => {
+    requireRole(req, url, "admin");
+    // Pull the provider's catalog. assertClosedLoop runs on every product; the
+    // refused ones come back by name so the console can show what was turned away.
+    const products = await provider.catalog();
+    const { accepted, refused } = catalog.syncFromProvider(products);
+    store.log("admin.catalog_synced", { fetched: products.length, accepted: accepted.length, refused: refused.map((r) => r.productCode) });
+    return { fetched: products.length, accepted, refused };
   });
 
   route("POST", /^\/api\/admin\/pause$/, async ({ req, url }) => {

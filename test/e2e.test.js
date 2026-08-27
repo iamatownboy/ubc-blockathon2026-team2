@@ -311,15 +311,37 @@ test("11. every catalog product is closed loop and priced at 20 credits per doll
 });
 
 test("12. an open-loop product is refused — by the catalog rule and by the admin console", async () => {
-  assert.throws(() => catalog.syncFromProvider(PROVIDER_PRODUCTS), catalog.OpenLoopProductError);
-  const closedOnly = PROVIDER_PRODUCTS.filter((p) => !p.openLoop);
-  assert.equal(catalog.syncFromProvider(closedOnly).length, closedOnly.length);
+  const sync = catalog.syncFromProvider(PROVIDER_PRODUCTS);
+  assert.equal(sync.accepted.length, PROVIDER_PRODUCTS.filter((p) => !p.openLoop).length);
+  assert.deepEqual(sync.refused.map((r) => r.productCode), ["VISA-CA-2500"]);
+  const viaApi = await call("/api/admin/catalog/sync", { method: "POST", role: "admin" });
+  assert.equal(viaApi.status, 200);
+  assert.deepEqual(viaApi.body.refused.map((r) => r.productCode), ["VISA-CA-2500"]);
+  assert.ok(viaApi.body.accepted.every((p) => p.closedLoop));
   for (const p of [{ productCode: "VISA-CA-2500", brand: "Visa Prepaid" }, { productCode: "X-1", brand: "Mastercard Gift" }, { productCode: "X-2", brand: "Anything", network: "VISA" }, { productCode: "X-3", brand: "Anything", openLoop: true }]) {
     assert.throws(() => catalog.assertClosedLoop(p), catalog.OpenLoopProductError, p.productCode);
   }
   const res = await call("/api/admin/catalog", { method: "POST", role: "admin", body: { itemId: "0x" + "ab".repeat(32), productCode: "VISA-CA-2500", brand: "Visa Prepaid", cost: 500, inventory: 10, active: true } });
   assert.equal(res.status, 422);
   assert.equal(res.body.error, "unapproved_product");
+});
+
+test("12a2. a closed-loop product the programme never approved syncs as unlisted and still cannot be configured", async () => {
+  const { body } = await call("/api/admin/catalog/sync", { method: "POST", role: "admin" });
+  const petro = body.accepted.find((p) => p.productCode === "PETROCAN-CA-2500");
+  // It is not open loop, so it is not refused outright — the provider really sells it.
+  assert.ok(petro, "a closed-loop provider product must come back accepted");
+  assert.equal(petro.listed, false, "but being in the provider's catalog is not programme approval");
+  assert.ok(body.accepted.filter((p) => p.listed).every((p) => catalog.get(p.itemId)));
+  // And the console cannot turn it into a listed item.
+  const res = await call("/api/admin/catalog", {
+    method: "POST",
+    role: "admin",
+    body: { itemId: petro.itemId, productCode: petro.productCode, cost: petro.cost, inventory: 5, active: true },
+  });
+  assert.equal(res.status, 422);
+  assert.equal(res.body.error, "unapproved_product");
+  assert.equal((await call("/api/catalog")).body.items.find((i) => i.productCode === "PETROCAN-CA-2500"), undefined);
 });
 
 test("12b. the admin cannot substitute a product code on an approved item", async () => {
