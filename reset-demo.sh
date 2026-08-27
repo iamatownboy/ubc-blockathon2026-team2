@@ -27,7 +27,7 @@ if [[ "$MODE" == "chain" ]]; then
   export LEDGER=chain
 fi
 
-echo "→ starting service (ledger=${LEDGER:-memory})…"
+echo "→ starting service (ledger=${LEDGER:-auto: chain when shared/deployment.json exists, else the demo mirror})…"
 nohup node server/server.js > /tmp/languagetoken-service.log 2>&1 &
 sleep 1
 echo "✓ demo reset complete."
