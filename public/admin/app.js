@@ -71,7 +71,7 @@
 
     $("swaps").querySelector("tbody").innerHTML = s.swaps.length
       ? s.swaps
-          .map((w) => `<tr><td>${w.swapId}</td><td><span class="badge ${w.status === "Settled" ? "green" : w.status === "Cancelled" ? "red" : "amber"}">${w.status}</span></td><td>${esc(w.brand)}</td><td>${w.cost}</td><td>${w.last4 ? `•••• ${w.last4}` : "—"}</td><td class="mono">${esc(w.orderRef ?? "—")}</td><td>${w.reveals}</td><td class="tiny">${w.recovered ? "recovered after ghost/timeout" : ""}${w.reason ? esc(w.reason) : ""}</td><td>${w.status === "Requested" ? `<button class="btn-danger btn-sm" data-cancel="${w.swapId}">cancel + refund</button>` : ""}</td></tr>`)
+          .map((w) => `<tr><td>${w.swapId}</td><td><span class="badge ${w.status === "Settled" ? "green" : w.status === "Cancelled" ? "red" : "amber"}">${w.status}</span></td><td>${esc(w.brand)}</td><td>${w.cost}</td><td>${w.last4 ? `•••• ${w.last4}` : "—"}</td><td class="mono">${esc(w.orderRef ?? "—")}</td><td>${w.reveals}</td><td class="tiny">${w.recovered ? "recovered after ghost/timeout" : ""}${w.reason ? esc(w.reason) : ""}</td><td>${w.status === "Requested" ? `<button class="btn-danger btn-sm" data-cancel="${w.swapId}">reconcile</button>` : ""}</td></tr>`)
           .join("")
       : `<tr><td colspan="9" class="muted">No swaps yet.</td></tr>`;
 
@@ -103,10 +103,25 @@
   // ---------------------------------------------------------------- stream
 
   let es = null;
-  function connectStream() {
+  let reconnectTimer = null;
+  let streamGeneration = 0;
+  async function connectStream() {
+    const generation = ++streamGeneration;
     if (es) es.close();
-    es = new EventSource(`/api/stream?token=${encodeURIComponent($token.value)}`);
-    es.onmessage = (msg) => {
+    es = null;
+    clearTimeout(reconnectTimer);
+    let ticket;
+    try {
+      ({ ticket } = await api("/api/admin/stream-ticket", "POST", {}));
+    } catch (err) {
+      $("conn").textContent = String(err.message);
+      $("conn").className = "badge red";
+      return;
+    }
+    if (generation !== streamGeneration) return;
+    const source = new EventSource(`/api/stream?ticket=${encodeURIComponent(ticket)}`);
+    es = source;
+    source.onmessage = (msg) => {
       const data = JSON.parse(msg.data);
       if (data.type === "ledger") {
         push($("events"), line("ev", eventText(data.event)));
@@ -116,9 +131,13 @@
         if (/swap|provider|mission|admin/.test(data.entry.event)) load();
       }
     };
-    es.onerror = () => {
+    source.onerror = () => {
+      source.close();
+      if (generation !== streamGeneration) return;
+      es = null;
       $("conn").textContent = "stream lost — retrying";
       $("conn").className = "badge amber";
+      reconnectTimer = setTimeout(connectStream, 1000);
     };
   }
 
@@ -185,7 +204,7 @@
   }));
   $("swaps").addEventListener("click", guard(async (e) => {
     const b = e.target.closest("[data-cancel]");
-    if (b && confirm(`Cancel swap #${b.dataset.cancel} and refund the learner?`)) await api(`/api/admin/swaps/${b.dataset.cancel}/cancel`, "POST", { reason: "admin:console" });
+    if (b && confirm(`Reconcile swap #${b.dataset.cancel}? It will settle a found order and keep an unknown result pending.`)) await api(`/api/admin/swaps/${b.dataset.cancel}/cancel`, "POST", { reason: "admin:console" });
   }));
 
   load();

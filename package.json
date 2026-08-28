@@ -9,7 +9,7 @@
     "start:chain": "LEDGER=chain node server/server.js",
     "provider": "node server/bhn-mock.js",
     "codes": "node scripts/make-codes.js",
-    "test": "node --test test/ledger.test.js test/e2e.test.js test/parity.test.js",
+    "test": "node --test test/ledger.test.js test/e2e.test.js test/parity.test.js test/ui-smoke.test.js",
     "test:ledger": "node --test test/ledger.test.js",
     "test:e2e": "node --test test/e2e.test.js",
     "test:parity": "node --test test/parity.test.js",

@@ -36,7 +36,7 @@
   <div class="grid">
     <div class="card">
       <h2>Provider failure switches <span class="badge" id="provider-mode"></span></h2>
-      <p class="tiny">Arm one, then run a swap in the learner app. <b>error</b>: 502 → refund. <b>timeout</b>: no answer, no card → lookup finds nothing → refund. <b>ghost</b>: card issued, response dropped → lookup finds it → one card, one order, one unit of stock.</p>
+      <p class="tiny">Arm one, then run a swap in the learner app. <b>error</b> / <b>timeout</b>: an ambiguous result stays Requested unless the provider gives an authoritative final failure. <b>ghost</b>: card issued, response dropped → lookup recovers it. <b>httpghost</b>: card issued, then 502 → lookup still recovers the same card.</p>
       <div class="modes" id="modes"></div>
       <label class="tiny"><input type="checkbox" id="once" checked style="width:auto"> one-shot (revert to normal after the next order)</label>
       <div class="tiny" style="margin-top:.6rem">Provider log</div>

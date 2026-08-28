@@ -1,4 +1,4 @@
-// End to end, 24 tests — the service, the mock provider and the sealed
+// End to end, 50 tests — the service, the mock provider and the sealed
 // wallet, over real HTTP on ephemeral ports. Run: npm test
 "use strict";
 
@@ -136,6 +136,22 @@ test("1c. a session needs a partner-issued code, and an unissued one is refused"
   assert.equal(typo.body.handle, (await call("/api/session", { method: "POST", body: { publicKey: keys.publicJwk, enrollmentCode: "TEST-CODE-00" } })).body.handle);
 });
 
+test("1c2. a malformed P-256 JWK is refused before a session, device or provider order exists", async () => {
+  const beforeSessions = app.store.sessions.size;
+  const beforeDevices = app.store.devices.size;
+  for (const publicKey of [
+    { kty: "EC", crv: "P-256", x: "AA", y: "AA" },
+    { kty: "EC", crv: "P-256", x: "not-base64url!", y: "also-bad!" },
+  ]) {
+    const refused = await call("/api/session", { method: "POST", body: { publicKey, enrollmentCode: nextCode() } });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error, "bad_public_key");
+  }
+  assert.equal(app.store.sessions.size, beforeSessions);
+  assert.equal(app.store.devices.size, beforeDevices);
+  assert.equal(mock.state.orders.size, 0);
+});
+
 test("1d. wiping the browser after a swap does not buy a second card on the same code", async () => {
   const l = await learner();
   await pass(l);
@@ -181,6 +197,28 @@ test("1g. a production deployment cannot fall back to the demo code list", async
   assert.equal(open.required, false); // an explicit, documented opt-out
   const demo = createEnrollment({ secret: "s", production: false });
   assert.ok(demo.demoCodes.length > 0 && demo.required);
+});
+
+test("1g2. production requires long, distinct identity and role secrets", () => {
+  const options = {
+    providerUrl: "http://127.0.0.1:1",
+    production: true,
+    enrollment,
+    identitySecret: "i".repeat(32),
+    adminToken: "a".repeat(32),
+    verifierToken: "v".repeat(32),
+  };
+  assert.doesNotThrow(() => createApp(options));
+  for (const [field, value] of [
+    ["identitySecret", "short"],
+    ["adminToken", "short"],
+    ["verifierToken", "short"],
+  ]) {
+    assert.throws(() => createApp({ ...options, [field]: value }), /at least 32 bytes/);
+  }
+  assert.throws(() => createApp({ ...options, verifierToken: options.adminToken }), /all be different/);
+  assert.throws(() => createApp({ ...options, identitySecret: options.adminToken }), /all be different/);
+  assert.throws(() => createApp({ ...options, identitySecret: options.verifierToken }), /all be different/);
 });
 
 test("1h. guessing participation codes is throttled, and a correct one forgives the typos", async () => {
@@ -349,6 +387,16 @@ test("9. the verifier can reject, and the consoles are token-gated", async () =>
   assert.equal(reject.body.status, "rejected");
   assert.equal("attempts" in app.store.reviewQueue.get(body.reviewId), false);
   assert.equal((await call("/api/me", { token: l.token })).body.balance, 0);
+
+  const queryToken = await fetch(base + "/api/admin/state?token=admin-test");
+  assert.equal(queryToken.status, 401, "long-lived role tokens must never authenticate from a URL");
+  const ticket = await call("/api/admin/stream-ticket", { method: "POST", role: "admin" });
+  assert.equal(ticket.status, 200);
+  assert.match(ticket.body.ticket, /^[A-Za-z0-9_-]+$/);
+  const stream = await fetch(base + `/api/stream?ticket=${encodeURIComponent(ticket.body.ticket)}`);
+  assert.equal(stream.status, 200);
+  await stream.body.cancel();
+  assert.equal((await fetch(base + `/api/stream?ticket=${encodeURIComponent(ticket.body.ticket)}`)).status, 401, "a stream ticket is one-use");
 });
 
 test("10. three missions are open and each pays once; the balance shows its expiry", async () => {
@@ -496,6 +544,26 @@ test("12d. abandoned review text expires and is removed", async () => {
   assert.equal("attempts" in expired, false);
 });
 
+test("12d2. expired reviews cannot be approved or rejected through direct mutation URLs", async () => {
+  for (const action of ["approve", "reject"]) {
+    const l = await learner();
+    const submitted = await call("/api/submit", {
+      method: "POST",
+      token: l.token,
+      body: { missionId: MISSION.missionId, answers: correctAnswers(), attempts: ["Hi! Is there an English group?"] },
+    });
+    const row = app.store.reviewQueue.get(submitted.body.reviewId);
+    row.reviewExpiresAt = new Date(Date.now() - 1000).toISOString();
+    app.store.reviewQueue.put(row.id, row);
+    const decided = await call(`/api/verifier/queue/${row.id}/${action}`, { method: "POST", role: "verifier" });
+    assert.equal(decided.status, 409);
+    assert.equal(app.store.reviewQueue.get(row.id).status, "expired");
+    assert.equal("answers" in app.store.reviewQueue.get(row.id), false);
+    assert.equal("attempts" in app.store.reviewQueue.get(row.id), false);
+    assert.equal((await call("/api/me", { token: l.token })).body.balance, 0);
+  }
+});
+
 test("12e. proof commitments bind the graded attempts and canonical answers", () => {
   const nonce = "fixed-nonce";
   const a = assessment.proofHash("learner", MISSION, { answers: { b: 2, a: 1 }, attempts: ["one"] }, nonce);
@@ -571,33 +639,33 @@ test("16. burn first: credits and one unit of stock leave before the provider is
   assert.equal(mock.state.orders.size, 1);
 });
 
-test("17. a provider error refunds: credits and stock come back, nothing is settled", async () => {
+test("17. an ambiguous provider 502 stays requested instead of risking card plus refund", async () => {
   const l = await learner();
   await pass(l);
   const item = await catalogItem();
   mock.setMode("error");
   const { status, body } = await swapFor(l, item);
   assert.equal(status, 200);
-  assert.equal(body.status, "Cancelled");
-  assert.equal(body.error.code, "provider");
-  assert.equal(body.balance, 100);
-  assert.equal((await catalogItem()).inventory, item.inventory);
+  assert.equal(body.status, "Requested");
+  assert.equal(body.warning.code, "provider_pending");
+  assert.equal(body.balance, 0);
+  assert.equal((await catalogItem()).inventory, item.inventory - 1);
   assert.equal(mock.state.orders.size, 0);
   assert.equal((await ledger.stats()).swapped, 0);
-  // the failure switch was one-shot; the next swap goes through
-  assert.equal((await swapFor(l, item)).body.status, "Settled");
+  assert.equal((await ledger.stats()).inSwap, item.cost);
 });
 
-test("18. a provider timeout with no card issued is a refund, found by lookup — not a re-order", async () => {
+test("18. a provider timeout with negative lookups stays requested — not refunded or re-ordered", async () => {
   const l = await learner();
   await pass(l);
   const item = await catalogItem();
   mock.setMode("timeout");
   const { body } = await swapFor(l, item);
-  assert.equal(body.status, "Cancelled");
-  assert.equal(body.reason, "provider:unfulfilled");
-  assert.equal(body.balance, 100);
-  assert.equal((await catalogItem()).inventory, item.inventory);
+  assert.equal(body.status, "Requested");
+  assert.equal(body.warning.code, "provider_pending");
+  assert.equal(body.balance, 0);
+  assert.equal((await catalogItem()).inventory, item.inventory - 1);
+  assert.equal((await ledger.stats()).inSwap, item.cost);
   assert.ok(mock.state.log.some((e) => e.event === "order.lookup" && e.found === false));
   assert.equal(mock.state.log.filter((e) => e.event === "order.hung").length, 1); // exactly one order attempt
 });
@@ -618,6 +686,138 @@ test("19. a ghosted order is recovered rather than re-ordered: one order, one ca
   const card = sealing.open(body.sealed, l.privateKey);
   assert.equal((await app.provider.balance(card.cardnbr)).balance, 5);
   assert.ok(app.store.logEntries.some((e) => e.event === "swap.recovered"));
+});
+
+test("19a. a 502 after issue is reconciled by request id instead of refunded", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  mock.setMode("httpghost");
+  const { body } = await swapFor(l, item);
+  assert.equal(body.status, "Settled");
+  assert.equal(body.recovered, true);
+  assert.equal(body.balance, 0);
+  assert.equal(mock.state.orders.size, 1);
+  assert.equal(mock.state.cards.size, 1);
+  assert.ok(mock.state.log.some((e) => e.event === "order.httpghost"));
+  assert.ok(mock.state.log.some((e) => e.event === "order.lookup" && e.found === true));
+});
+
+test("19a2. an unresolvable provider result stays requested and is not refunded or re-ordered", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  app.provider.orderOnce = async () => {
+    const err = new Error("order state cannot be established");
+    err.kind = "uncertain";
+    throw err;
+  };
+  const { body } = await swapFor(l, item);
+  assert.equal(body.status, "Requested");
+  assert.equal(body.warning.code, "provider_pending");
+  assert.equal(body.balance, 0, "credits remain reserved while the result is uncertain");
+  assert.equal((await ledger.stats()).inSwap, item.cost);
+  assert.equal((await catalogItem()).inventory, item.inventory - 1);
+  assert.equal(app.store.swaps.get(body.swapId).status, "Requested");
+});
+
+test("19a3. one failed lookup keeps a later not-found result uncertain", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  app.provider.order = async () => {
+    const err = new Error("ambiguous order response");
+    err.kind = "network";
+    throw err;
+  };
+  let lookups = 0;
+  app.provider.lookup = async () => {
+    lookups += 1;
+    if (lookups === 1) {
+      const err = new Error("lookup unavailable");
+      err.kind = "network";
+      throw err;
+    }
+    return null;
+  };
+  const { body } = await swapFor(l, item);
+  assert.equal(body.status, "Requested");
+  assert.equal(body.warning.code, "provider_pending");
+  assert.equal(lookups, 3);
+  assert.equal((await ledger.stats()).inSwap, item.cost);
+});
+
+test("19a4. admin cancel reconciles an already-issued card instead of refunding it", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  app.provider.orderOnce = async () => {
+    const err = new Error("order outcome unknown");
+    err.kind = "uncertain";
+    throw err;
+  };
+  const pending = (await swapFor(l, item)).body;
+  assert.equal(pending.status, "Requested");
+  const record = app.store.swaps.get(pending.swapId);
+  const issued = await fetch(providerBase + "/v1/orders", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-partner-cert": "demo-partner-cert", "x-request-id": record.requestHash },
+    body: JSON.stringify({ productCode: item.productCode, quantity: 1, delivery: "api" }),
+  });
+  assert.equal(issued.status, 201);
+
+  const resolved = await call(`/api/admin/swaps/${pending.swapId}/cancel`, { method: "POST", role: "admin", body: { reason: "admin:test" } });
+  assert.equal(resolved.status, 200);
+  assert.equal(resolved.body.status, "Settled");
+  assert.equal(resolved.body.recovered, true);
+  assert.equal((await call("/api/me", { token: l.token })).body.balance, 0, "an issued card must not also be refunded");
+  const stats = await ledger.stats();
+  assert.equal(stats.inSwap, 0);
+  assert.equal(stats.swapped, item.cost);
+  assert.equal(mock.state.orders.size, 1);
+  assert.equal(mock.state.cards.size, 1);
+});
+
+test("19a5. admin cancel refuses to refund while provider lookup is uncertain", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  app.provider.orderOnce = async () => {
+    const err = new Error("order outcome unknown");
+    err.kind = "uncertain";
+    throw err;
+  };
+  const pending = (await swapFor(l, item)).body;
+  app.provider.reconcile = async () => {
+    const err = new Error("lookup unavailable");
+    err.kind = "uncertain";
+    throw err;
+  };
+  const refused = await call(`/api/admin/swaps/${pending.swapId}/cancel`, { method: "POST", role: "admin", body: { reason: "admin:test" } });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "provider_pending");
+  assert.equal((await call("/api/me", { token: l.token })).body.balance, 0);
+  assert.equal((await ledger.stats()).inSwap, item.cost);
+  assert.equal(app.store.swaps.get(pending.swapId).status, "Requested");
+});
+
+test("19a6. admin cancel treats clean negative lookups as pending, not proof for a refund", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  app.provider.orderOnce = async () => {
+    const err = new Error("order outcome unknown");
+    err.kind = "uncertain";
+    throw err;
+  };
+  const pending = (await swapFor(l, item)).body;
+  app.provider.reconcile = async () => null;
+  const refused = await call(`/api/admin/swaps/${pending.swapId}/cancel`, { method: "POST", role: "admin", body: { reason: "admin:test" } });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "provider_pending");
+  assert.equal((await call("/api/me", { token: l.token })).body.balance, 0);
+  assert.equal((await ledger.stats()).inSwap, item.cost);
+  assert.equal(app.store.swaps.get(pending.swapId).status, "Requested");
 });
 
 test("19b. a provider-issued card is recovered after an app restart without a second order", async () => {
@@ -762,8 +962,8 @@ test("23. /api/stats is readable with no login and the ledger conserves credits"
   assert.equal(status, 200);
   const s = body.ledger;
   assert.equal(s.awarded, s.outstanding + s.inSwap + s.swapped + s.expired);
-  assert.deepEqual({ awarded: s.awarded, swapped: s.swapped, outstanding: s.outstanding }, { awarded: 200, swapped: 100, outstanding: 100 });
-  assert.deepEqual(body.swaps, { requested: 0, settled: 1, cancelled: 1, recovered: 0 });
+  assert.deepEqual({ awarded: s.awarded, swapped: s.swapped, outstanding: s.outstanding, inSwap: s.inSwap }, { awarded: 200, swapped: 100, outstanding: 0, inSwap: 100 });
+  assert.deepEqual(body.swaps, { requested: 1, settled: 1, cancelled: 0, recovered: 0 });
   assert.equal(body.learners, 2);
   assert.equal(body.limits.maxMissionReward, 2000);
   assert.ok(body.catalog.every((c) => typeof c.inventory === "number"));

@@ -8,6 +8,7 @@
 //   error    502 — the provider is down
 //   timeout  accept the connection and never answer; no card is issued
 //   ghost    issue the card, then drop the response on the floor
+//   httpghost issue the card, then return 502; lookup must recover it
 //
 // The order endpoint accepts NO recipient block: cards come back in the
 // response (API-return mode) and the programme delivers them itself, so an
@@ -30,7 +31,7 @@ const PRODUCTS = [
   { productCode: "VISA-CA-2500", brand: "Visa Prepaid", valueCad: 25, currency: "CAD", openLoop: true, network: "VISA" },
 ];
 
-const MODES = ["normal", "error", "timeout", "ghost"];
+const MODES = ["normal", "error", "timeout", "ghost", "httpghost"];
 
 function createMockProvider({ cert = "demo-partner-cert" } = {}) {
   const state = {
@@ -167,6 +168,10 @@ function createMockProvider({ cert = "demo-partner-cert" } = {}) {
         return; // never answered; nothing was issued
       }
       const order = createOrder(requestId, product);
+      if (mode === "httpghost") {
+        log("order.httpghost", { requestId, orderRef: order.orderRef, mode });
+        return json(res, 502, { error: "gateway_failed_after_issue", message: "gateway failed after the issuer accepted the order" });
+      }
       if (mode === "ghost") {
         log("order.ghosted", { requestId, orderRef: order.orderRef, mode });
         req.socket.destroy(); // the card exists; the caller hears nothing

@@ -2,6 +2,8 @@
 
 [![tests](https://github.com/iamatownboy/ubc-blockathon2026-team2/actions/workflows/ci.yml/badge.svg)](https://github.com/iamatownboy/ubc-blockathon2026-team2/actions/workflows/ci.yml)
 
+[한국어 README](README.ko.md)
+
 > **Learn local. Earn local. Belong local.**
 
 Newcomers practise three-minute, real-world English missions and earn
@@ -79,6 +81,13 @@ The limiter is in-process. Behind several instances it needs a shared counter,
 and it trusts `X-Forwarded-For` only when `TRUST_PROXY=1` says a proxy sets it
 — otherwise anyone could reset their own counter with a header.
 
+The learner public key is parsed as a real P-256 JWK before a session is
+created. A malformed object is rejected before it can reserve stock or reach
+the provider. Admin and verifier role tokens are accepted only in request
+headers. The admin event stream exchanges that long-lived token for a
+one-minute, one-use ticket, so the role token never appears in a stream URL or
+browser history.
+
 ### Who can use it
 
 The learner app is the whole product for someone who may be new to the
@@ -129,21 +138,22 @@ published demo values:
 
 ```bash
 NODE_ENV=production \
-IDENTITY_SECRET='at-least-32-random-bytes' \
-ADMIN_TOKEN='a-long-random-token' \
-VERIFIER_TOKEN='a-different-long-random-token' \
+IDENTITY_SECRET="$(openssl rand -base64 32)" \
+ADMIN_TOKEN="$(openssl rand -base64 32)" \
+VERIFIER_TOKEN="$(openssl rand -base64 32)" \
 LEDGER=chain node server/server.js
 ```
 
-Production mode refuses to start with the demo identity secret or demo role
-tokens. Real provider use also requires provider onboarding, programme/catalog
-approval and the provider's actual authentication setup; it is not only a URL
-change.
+Production mode requires all three values to be at least 32 UTF-8 bytes and
+requires all three values to differ; weak, demo, or reused values stop the
+server at startup. Real provider use also requires provider onboarding,
+programme/catalog approval and the provider's actual authentication setup; it
+is not only a URL change.
 
 ## Tests
 
 ```bash
-npm test                          # 28 ledger + 41 end-to-end + 1 parity, under 10 s, no toolchain
+npm test                          # 28 ledger + 50 end-to-end + 2 UI smoke + 1 parity
 npm run test:parity               # the parity suite alone (needs a running chain)
 cd contracts && npx hardhat test  # 23 Solidity tests (needs the network once, for npm install)
 cd contracts && SOLC_JS=1 npx hardhat test   # same 23, offline: uses the solcjs in node_modules
@@ -178,16 +188,23 @@ submission would have stopped the verifier key awarding anything for the rest
 of an on-chain demo. Fixed, and the parity run now passes against a live
 Hardhat chain.
 
-**End to end, 41 tests.** A session refused without a partner-issued code and
+**End to end, 50 tests.** A session refused without a partner-issued code and
 a wiped browser landing back on the same handle, balance and lifetime cap; the
 code never appearing in the store; the coach filter stripping `pass` and `credits`; a
 tampered submission awarding nothing; grading and the review queue; the
 verifier awarding the configured amount and ignoring an amount in the request;
 every catalog product closed loop and an open-loop one refused; a swap
 delivering a card the learner's key opens and a stranger's key does not; the
-card being real at the provider's balance endpoint; a provider error refunding;
-a ghosted order recovered rather than re-ordered; pause; and no card number,
-pin, or name anywhere in the logs or events.
+card being real at the provider's balance endpoint; a confirmed provider
+failure refunding; both a dropped response and an HTTP 502-after-issue being
+recovered rather than re-ordered; an unresolved provider result remaining
+Requested without refund; expired reviews being impossible to approve through
+a direct API call; role tokens being rejected in query strings; production
+secret checks; pause; and no card number, pin, or name anywhere in the logs or
+events. Two UI smoke tests execute the verifier script against a small DOM and
+pin both the empty queue and a finalized row whose learner-written content was
+deleted, so neither an undefined helper nor privacy cleanup can blank the
+console again.
 
 ## Where things live
 
@@ -199,8 +216,8 @@ server/
   server.js        API + hosts the three clients
   ledger.js        the contract's rules mirrored in JS; memory | chain
   swap.js          burn → order → seal → settle, and the refund path
-  bhn-client.js    provider client: certificate-style auth, idempotency, timeout recovery
-  bhn-mock.js      provider stand-in, with the failure modes (error / timeout / ghost)
+  bhn-client.js    provider client: certificate-style auth, idempotency, ambiguous-result recovery
+  bhn-mock.js      provider stand-in, with error / timeout / ghost / httpghost modes
   sealing.js       ECDH + HKDF + AES-GCM to the learner's key
   assessment.js    three missions, fixed grading, the filtered coach
   catalog.js       closed-loop products; open-loop cannot be listed
@@ -209,7 +226,7 @@ server/
   ratelimit.js     a sliding window per address, so codes cannot be guessed in a loop
   ids.js           bytes32 helpers, random handles
 public/learner · public/admin · public/verifier · public/demo (the stage)
-test/ledger.test.js · test/e2e.test.js · test/parity.test.js
+test/ledger.test.js · test/e2e.test.js · test/ui-smoke.test.js · test/parity.test.js
 scripts/make-codes.js                     high-entropy participation codes for a real desk
 make-submission.sh                        git archive → a clean source-only bundle
 .github/workflows/ci.yml                  every push runs both suites on Node 20 and 22
@@ -262,11 +279,16 @@ function pause() / unpause()
 
 ## Demo it, don't describe it
 
-In the admin console, arm **ghost** and run a swap in the learner app. The
+In the admin console, arm **ghost** or **httpghost** and run a swap in the learner app. The
 provider issues the card and drops the response; the client times out, asks
 the provider about that request id, finds the order, and delivers the one card
 that exists. The admin log shows one order, one settlement, one unit of stock.
-Arm **error** or **timeout** instead and watch the refund land.
+`httpghost` proves the same recovery happens after an ambiguous HTTP 502.
+A negative lookup after a timeout or 5xx is not treated as final because the
+provider may be eventually consistent. The swap stays Requested and keeps its
+credits and inventory reserved until an order is found or the real provider
+returns a contract-defined authoritative terminal failure; it is never both
+refunded and delivered.
 
 ## Why it can't become cash
 
@@ -279,6 +301,7 @@ Arm **error** or **timeout** instead and watch the refund land.
 ## Limits, stated before a judge finds them
 
 - The provider is a mock. No real card is issued and no real card number is handled anywhere in this build.
+- The mock's `4xx = definitive failure`, `5xx/timeout = ambiguous result` model must be checked against the contracted provider's exact API before production. Unknown outcomes deliberately remain Requested for operator reconciliation.
 - One verifier key. The mission registry is what makes that survivable, not acceptable.
 - The demo operator holds every role and submits every transaction.
 - Expiry is per account, not per lot.
@@ -287,7 +310,7 @@ Arm **error** or **timeout** instead and watch the refund land.
 - The person-level cap is only as good as the partner's code hygiene: someone handed two codes is two learners to this service. Distribution controls (one code per person at the desk, codes voided when reissued) are a programme responsibility this build cannot enforce, and a funded pilot should add per-code issuance records on the partner side.
 - Cards are sealed to the device key that last used the code. Retyping the code on a new device restores the balance but not cards sealed to the old key — stated in the wallet screen, not hidden.
 - The rate limiter lives in one process's memory. It is the right shape and the wrong scale for more than one instance.
-- The `admin-demo` / `verifier-demo` tokens are published here and in the consoles, which flag themselves in red while either is in use. They are fine on a laptop and nowhere else; production refuses to start with them.
+- The `admin-demo` / `verifier-demo` tokens are published here and in the consoles, which flag themselves in red while either is in use. They are fine on a laptop and nowhere else; production requires long, distinct replacements. Role tokens are header-only and the live event stream uses a short-lived one-use ticket.
 - The working checkout carries roughly a gigabyte of dependencies and build output. None of it is tracked — `./make-submission.sh` exports the tracked source and lockfiles only (about 1.8 MB, 55 files) so a reviewer installs dependencies themselves.
 - No partnership with the City of Vancouver, any library, settlement organisation, brand or provider is claimed.
 - The chain cannot verify that learning happened. It makes the verifiers and criteria traceable.

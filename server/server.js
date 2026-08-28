@@ -19,6 +19,7 @@
 "use strict";
 
 const http = require("http");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
@@ -53,6 +54,8 @@ const SECURITY_HEADERS = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "SAMEORIGIN",
 };
+const MIN_PRODUCTION_SECRET_BYTES = 32;
+const STREAM_TICKET_TTL_MS = 60 * 1000;
 
 class HttpError extends Error {
   constructor(status, code, message, extra = {}) {
@@ -72,6 +75,7 @@ function createApp({
   adminToken = process.env.ADMIN_TOKEN ?? "admin-demo",
   verifierToken = process.env.VERIFIER_TOKEN ?? "verifier-demo",
   identitySecret = process.env.IDENTITY_SECRET ?? "demo-identity-secret-change-me",
+  production = process.env.NODE_ENV === "production",
   enrollment,
   // Eight wrong codes from one address per ten minutes. A learner who
   // mistypes is nowhere near it; a script guessing codes is stopped at eight.
@@ -80,15 +84,26 @@ function createApp({
   publicDir = PUBLIC_DIR,
 } = {}) {
   if (!providerUrl) throw new Error("createApp needs providerUrl");
-  if (process.env.NODE_ENV === "production") {
-    if (identitySecret === "demo-identity-secret-change-me") throw new Error("IDENTITY_SECRET must be set in production");
-    if (adminToken === "admin-demo" || verifierToken === "verifier-demo") throw new Error("demo role tokens are refused in production");
+  if (production) {
+    for (const [name, value] of [
+      ["IDENTITY_SECRET", identitySecret],
+      ["ADMIN_TOKEN", adminToken],
+      ["VERIFIER_TOKEN", verifierToken],
+    ]) {
+      if (typeof value !== "string" || Buffer.byteLength(value, "utf8") < MIN_PRODUCTION_SECRET_BYTES) {
+        throw new Error(`${name} must contain at least ${MIN_PRODUCTION_SECRET_BYTES} bytes in production`);
+      }
+    }
+    if (new Set([identitySecret, adminToken, verifierToken]).size !== 3) {
+      throw new Error("IDENTITY_SECRET, ADMIN_TOKEN and VERIFIER_TOKEN must all be different in production");
+    }
   }
-  const enrol = enrollment ?? createEnrollment({ secret: identitySecret });
+  const enrol = enrollment ?? createEnrollment({ secret: identitySecret, production });
   const codeAttempts = createRateLimiter({ limit: codeAttemptLimit, windowMs: codeAttemptWindowMs });
   const provider = createProviderClient({ baseUrl: providerUrl, cert: providerCert, timeoutMs: providerTimeoutMs });
   const swaps = createSwapService({ ledger, store, provider });
   const streams = new Set();
+  const streamTickets = new Map();
 
   // Every ledger event and log line reaches the admin console's live stream.
   ledger.onEvent((event) => broadcast({ type: "ledger", event }));
@@ -169,23 +184,53 @@ function createApp({
     return session;
   }
 
-  function requireRole(req, url, role) {
+  const secretEquals = (given, expected) => {
+    if (typeof given !== "string" || typeof expected !== "string") return false;
+    const a = crypto.createHash("sha256").update(given).digest();
+    const b = crypto.createHash("sha256").update(expected).digest();
+    return crypto.timingSafeEqual(a, b);
+  };
+
+  function requireRole(req, role) {
     const expected = role === "admin" ? adminToken : verifierToken;
-    const given = req.headers["x-role-token"] ?? url.searchParams.get("token");
-    if (!given || given !== expected) throw new HttpError(401, "role_required", `${role} token required`);
+    const given = req.headers["x-role-token"];
+    if (!secretEquals(given, expected)) throw new HttpError(401, "role_required", `${role} token required`);
     return role;
+  }
+
+  function issueStreamTicket() {
+    const now = Date.now();
+    for (const [ticket, expiresAt] of streamTickets) if (expiresAt <= now) streamTickets.delete(ticket);
+    const ticket = randomToken(24);
+    streamTickets.set(ticket, now + STREAM_TICKET_TTL_MS);
+    return ticket;
+  }
+
+  function consumeStreamTicket(url) {
+    const ticket = url.searchParams.get("ticket");
+    const expiresAt = ticket ? streamTickets.get(ticket) : null;
+    if (!ticket || !expiresAt || expiresAt <= Date.now()) throw new HttpError(401, "stream_ticket_required", "a fresh admin stream ticket is required");
+    streamTickets.delete(ticket);
   }
 
   const assertJwk = (jwk) => {
     if (!jwk || jwk.kty !== "EC" || jwk.crv !== "P-256" || typeof jwk.x !== "string" || typeof jwk.y !== "string") {
       throw new HttpError(400, "bad_public_key", "publicKey must be a P-256 EC JWK");
     }
-    return { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y };
+    const candidate = { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y };
+    try {
+      const key = crypto.createPublicKey({ key: candidate, format: "jwk" });
+      const canonical = key.export({ format: "jwk" });
+      return { kty: "EC", crv: "P-256", x: canonical.x, y: canonical.y };
+    } catch {
+      throw new HttpError(400, "bad_public_key", "publicKey must be a valid P-256 EC JWK");
+    }
   };
 
   const language = (v) => (typeof v === "string" && /^[a-z]{2}$/.test(v) ? v : "en");
 
   async function missionView(m, session) {
+    store.expireReviews();
     const cfg = await ledger.missionOf(m.missionId);
     const completed = session ? await ledger.missionCompleted(session.handle, m.missionId) : false;
     const pending = session
@@ -408,6 +453,7 @@ function createApp({
   // ---- public ---------------------------------------------------------
 
   route("GET", /^\/api\/stats$/, async () => {
+    store.expireReviews();
     const stats = await ledger.stats();
     const missions = [];
     for (const m of assessment.MISSIONS) {
@@ -446,7 +492,7 @@ function createApp({
   // ---- verifier -------------------------------------------------------
 
   route("GET", /^\/api\/verifier\/queue$/, async ({ req, url }) => {
-    requireRole(req, url, "verifier");
+    requireRole(req, "verifier");
     store.expireReviews();
     const queue = store.reviewQueue.values().sort((a, b) => (a.at < b.at ? 1 : -1));
     const out = [];
@@ -475,7 +521,8 @@ function createApp({
   });
 
   route("POST", /^\/api\/verifier\/queue\/([A-Za-z0-9_-]+)\/approve$/, async ({ req, url, params, body }) => {
-    requireRole(req, url, "verifier");
+    requireRole(req, "verifier");
+    store.expireReviews();
     const r = store.reviewQueue.get(params[0]);
     if (!r) throw new HttpError(404, "no_review", "no such review");
     if (r.status !== "pending") throw new HttpError(409, "decided", "already decided");
@@ -500,7 +547,8 @@ function createApp({
   });
 
   route("POST", /^\/api\/verifier\/queue\/([A-Za-z0-9_-]+)\/reject$/, async ({ req, url, params }) => {
-    requireRole(req, url, "verifier");
+    requireRole(req, "verifier");
+    store.expireReviews();
     const r = store.reviewQueue.get(params[0]);
     if (!r) throw new HttpError(404, "no_review", "no such review");
     if (r.status !== "pending") throw new HttpError(409, "decided", "already decided");
@@ -512,7 +560,7 @@ function createApp({
   // ---- admin ----------------------------------------------------------
 
   route("GET", /^\/api\/admin\/state$/, async ({ req, url }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     const missions = [];
     for (const m of assessment.MISSIONS) {
       const cfg = await ledger.missionOf(m.missionId);
@@ -540,7 +588,7 @@ function createApp({
   });
 
   route("POST", /^\/api\/admin\/missions$/, async ({ req, url, body }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     if (!isBytes32(body.missionId)) throw new HttpError(400, "bad_mission", "missionId must be bytes32");
     const current = await ledger.missionOf(body.missionId);
     const reward = body.reward ?? current.reward;
@@ -552,7 +600,7 @@ function createApp({
   });
 
   route("POST", /^\/api\/admin\/catalog$/, async ({ req, url, body }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     if (!isBytes32(body.itemId)) throw new HttpError(400, "bad_item", "itemId must be bytes32");
     const product = catalog.get(body.itemId);
     if (!product) {
@@ -572,7 +620,7 @@ function createApp({
   });
 
   route("POST", /^\/api\/admin\/catalog\/sync$/, async ({ req, url }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     // Pull the provider's catalog. assertClosedLoop runs on every product; the
     // refused ones come back by name so the console can show what was turned away.
     const products = await provider.catalog();
@@ -582,42 +630,42 @@ function createApp({
   });
 
   route("POST", /^\/api\/admin\/pause$/, async ({ req, url }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     await ledger.pause("admin");
     store.log("admin.paused", {});
     return { paused: true };
   });
 
   route("POST", /^\/api\/admin\/unpause$/, async ({ req, url }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     await ledger.unpause("admin");
     store.log("admin.unpaused", {});
     return { paused: false };
   });
 
   route("GET", /^\/api\/admin\/log$/, async ({ req, url }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     return { log: store.logEntries.slice(-300) };
   });
 
   route("GET", /^\/api\/admin\/provider$/, async ({ req, url }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     return providerAdmin("GET", "/admin/state");
   });
 
   route("POST", /^\/api\/admin\/provider\/mode$/, async ({ req, url, body }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     const result = await providerAdmin("POST", "/admin/mode", { mode: body.mode, once: body.once !== false });
     store.log("admin.provider_mode", { mode: body.mode, once: body.once !== false });
     return result;
   });
 
   route("POST", /^\/api\/admin\/swaps\/(\d+)\/cancel$/, async ({ req, url, params, body }) => {
-    requireRole(req, url, "admin");
+    requireRole(req, "admin");
     try {
       return await swaps.cancel({ swapId: params[0], reason: String(body.reason ?? "admin").slice(0, 32), actor: "admin" });
     } catch (err) {
-      if (err instanceof LedgerError) {
+      if (err instanceof LedgerError || err?.name === "InvalidSwap" || err?.name === "ProviderPending") {
         const plain = plainError(err);
         throw new HttpError(409, plain.code, plain.message);
       }
@@ -625,8 +673,13 @@ function createApp({
     }
   });
 
+  route("POST", /^\/api\/admin\/stream-ticket$/, async ({ req }) => {
+    requireRole(req, "admin");
+    return { ticket: issueStreamTicket(), expiresInSeconds: STREAM_TICKET_TTL_MS / 1000 };
+  });
+
   route("GET", /^\/api\/stream$/, async ({ req, res, url }) => {
-    requireRole(req, url, "admin");
+    consumeStreamTicket(url);
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
     res.write(`data: ${JSON.stringify({ type: "hello", ledger: ledger.mode })}\n\n`);
     streams.add(res);

@@ -2,6 +2,7 @@
 // whatever the mission registry says, and nothing this page sends can
 // change that.
 (function () {
+  const $ = (id) => document.getElementById(id);
   const $token = document.getElementById("token");
   const $queue = document.getElementById("queue");
   const $conn = document.getElementById("conn");
@@ -26,8 +27,13 @@
 
   function renderReview(r) {
     const crit = r.criteria.map((c) => `<div class="crit">${c.met ? "✅" : "❌"} <span>${esc(c.label)}</span></div>`).join("");
-    const attempts = r.attempts.map((a, i) => `<div class="attempt">${i + 1}. ${esc(a || "—")}</div>`).join("");
-    const answers = r.choices.map((q) => { const chosen = r.answers[q.id]; return `<div class="answer"><b>${esc(q.prompt)}</b><br>→ ${chosen === undefined ? "—" : esc(q.choices[chosen])}</div>`; }).join("");
+    const contentRemoved = !Array.isArray(r.attempts) || !r.answers;
+    const attempts = contentRemoved
+      ? `<div class="attempt muted">Learner-written content removed after review.</div>`
+      : r.attempts.map((a, i) => `<div class="attempt">${i + 1}. ${esc(a || "—")}</div>`).join("");
+    const answers = contentRemoved
+      ? `<div class="answer muted">Answers removed after review.</div>`
+      : r.choices.map((q) => { const chosen = r.answers[q.id]; return `<div class="answer"><b>${esc(q.prompt)}</b><br>→ ${chosen === undefined ? "—" : esc(q.choices[chosen])}</div>`; }).join("");
     const decided = r.status !== "pending";
     const actions = decided
       ? `<span class="badge ${r.status === "approved" ? "green" : "red"}">${r.status}${r.awarded ? ` · +${r.awarded}` : ""}</span>`

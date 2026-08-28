@@ -28,7 +28,7 @@ const crypto = require("node:crypto");
 const { MemoryLedger, ChainLedger, verifyLedger, ROLES, CREDIT_TTL } = require("../server/ledger");
 const assessment = require("../server/assessment");
 const catalog = require("../server/catalog");
-const { hashParts } = require("../server/ids");
+const { asciiBytes32, hashParts } = require("../server/ids");
 
 const DEPLOYMENT = path.join(__dirname, "..", "shared", "deployment.json");
 
@@ -76,7 +76,7 @@ async function seedMemory(ledger) {
   }
   for (const m of assessment.MISSIONS) await ledger.configureMission("admin", m.missionId, m.reward, m.version, true);
   for (const item of catalog.all()) {
-    await ledger.configureCatalogItem("admin", item.itemId, hashParts("product", item.productCode), item.cost, item.inventory, true);
+    await ledger.configureCatalogItem("admin", item.itemId, asciiBytes32(item.productCode), item.cost, item.inventory, true);
   }
 }
 

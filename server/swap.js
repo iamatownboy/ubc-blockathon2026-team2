@@ -43,6 +43,8 @@ function plainError(err) {
       return { code: "invalid_swap", message: "That swap can't be changed any more." };
     case "ProviderError":
       return { code: "provider", message: "The gift card provider didn't complete the order. Your credits have been returned." };
+    case "ProviderPending":
+      return { code: "provider_pending", message: "The provider has not confirmed the order yet. Your credits remain reserved while the same request is checked — no second card will be ordered." };
     default:
       return { code: "error", message: err?.message ?? "Something went wrong." };
   }
@@ -123,7 +125,19 @@ function createSwapService({ ledger, store, provider }) {
       order = result.order;
       record.recovered = result.recovered;
     } catch (err) {
-      // 2'. refund: credits and stock restored exactly --------------------------
+      // An ambiguous provider result is not permission to refund: a card may
+      // already exist. Keep the one swap open for reconciliation or an admin
+      // decision; never create a second order and never give both card+refund.
+      const confirmedFailure = err.kind === "unfulfilled" || err.kind === "unauthorized" || err.kind === "not_found" || (err.kind === "http" && Number(err.status) >= 400 && Number(err.status) < 500);
+      if (!confirmedFailure) {
+        record.reason = `provider:${err.kind ?? "uncertain"}`;
+        record.recoveryDeferredAt = new Date().toISOString();
+        store.swaps.put(swapId, record);
+        log("swap.recovery_deferred", { swapId, reason: record.reason });
+        return { ...publicView(record), warning: plainError({ name: "ProviderPending" }) };
+      }
+
+      // 2'. confirmed failure: credits and stock restored exactly ---------------
       const reason = err.kind ? `provider:${err.kind}` : "provider:error";
       await ledger.cancelSwap("fulfiller", swapId, reasonBytes32(reason));
       record.status = "Cancelled";
@@ -162,18 +176,25 @@ function createSwapService({ ledger, store, provider }) {
     return results;
   }
 
-  /** Admin-side cancel of a swap still Requested (e.g. a stuck one). */
+  /**
+   * Admin-side resolution of a stuck swap. Requested is not proof that the
+   * provider failed: it may have issued a card before its response was lost.
+   * Reconcile the same idempotency key before refunding.
+   */
   async function cancel({ swapId, reason = "admin", actor = "admin" }) {
     const record = store.swaps.get(Number(swapId));
-    await ledger.cancelSwap(actor, Number(swapId), reasonBytes32(reason));
-    if (record) {
-      record.status = "Cancelled";
-      record.reason = reason;
-      record.cancelledAt = new Date().toISOString();
-      store.swaps.put(record.swapId, record);
+    if (!record) throw Object.assign(new Error("the swap has no durable provider request to reconcile"), { name: "InvalidSwap" });
+    if (record.status === "Sealed") return settleDurable(record);
+    if (record.status !== "Requested") throw Object.assign(new Error(`cannot cancel swap ${swapId} from ${record.status}`), { name: "InvalidSwap" });
+    let order;
+    try {
+      order = await provider.reconcile(record.requestHash);
+    } catch (err) {
+      log("swap.recovery_deferred", { swapId: record.swapId, reason: `admin-cancel:${err.kind ?? "uncertain"}` });
+      throw Object.assign(new Error("provider lookup is still uncertain; the swap was not refunded"), { name: "ProviderPending", cause: err });
     }
-    log("swap.cancelled", { swapId: Number(swapId), reason, by: actor });
-    return record ? publicView(record) : { swapId: Number(swapId), status: "Cancelled" };
+    if (order) return sealAndSettle(record, order, { recovered: true, after: "admin-cancel-check" });
+    throw Object.assign(new Error("provider has not returned an authoritative terminal failure; the swap was not refunded"), { name: "ProviderPending" });
   }
 
   /** Reveal is counted and logged: a card revealed twenty times has left the app. */

@@ -304,11 +304,17 @@
           overlay.remove();
           go("wallet");
         };
-      } else {
+      } else if (result.status === "Cancelled") {
         overlay.querySelector(".sheet").innerHTML = `<div class="big">↩️</div><p class="notice amber">${esc(t("shop_refunded", { n: item.cost }))}</p><button class="btn-block" data-close>OK</button>`;
         overlay.querySelector("[data-close]").onclick = () => {
           overlay.remove();
           go("shop");
+        };
+      } else {
+        overlay.querySelector(".sheet").innerHTML = `<div class="big">⏳</div><p class="notice amber">${esc(t("shop_pending"))}</p><button class="btn-block" data-close>OK</button>`;
+        overlay.querySelector("[data-close]").onclick = () => {
+          overlay.remove();
+          go("wallet");
         };
       }
     } catch (err) {

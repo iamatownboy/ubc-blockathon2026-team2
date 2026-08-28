@@ -5,21 +5,22 @@
 // separate listener over HTTP. A real sandbox additionally requires provider
 // onboarding, approved product configuration and its actual certificate setup.
 //
-// The rule that matters: a timeout tells you nothing about whether the
-// provider issued a card. Retry blindly and you buy two. So a retry is a
-// LOOKUP by request id — never a re-order.
+// The rule that matters: a timeout, dropped connection or 5xx tells you
+// nothing about whether the provider issued a card. Retry blindly and you buy
+// two. So every ambiguous result becomes a LOOKUP by request id — never a
+// second order.
 "use strict";
 
 class ProviderError extends Error {
   constructor(kind, message, extra = {}) {
     super(message);
     this.name = "ProviderError";
-    this.kind = kind; // timeout | network | http | not_found | unauthorized
+    this.kind = kind; // timeout | network | http | not_found | unauthorized | unfulfilled | uncertain
     Object.assign(this, extra);
   }
 }
 
-function createProviderClient({ baseUrl, cert = "demo-partner-cert", timeoutMs = 4000, fetchImpl = globalThis.fetch } = {}) {
+function createProviderClient({ baseUrl, cert = "demo-partner-cert", timeoutMs = 4000, lookupAttempts = 3, lookupDelayMs = 75, fetchImpl = globalThis.fetch } = {}) {
   if (!baseUrl) throw new Error("provider client needs a baseUrl");
   baseUrl = baseUrl.replace(/\/$/, "");
 
@@ -48,6 +49,25 @@ function createProviderClient({ baseUrl, cert = "demo-partner-cert", timeoutMs =
     if (res.status === 404) throw new ProviderError("not_found", data?.error ?? "not found", { status: 404, data });
     if (!res.ok) throw new ProviderError("http", data?.message ?? data?.error ?? `provider returned ${res.status}`, { status: res.status, data });
     return data;
+  }
+
+  async function reconcileLookups(requestId, lookup) {
+    let hadLookupError = false;
+    let lastLookupError = null;
+    for (let attempt = 1; attempt <= lookupAttempts; attempt += 1) {
+      try {
+        const found = await lookup(requestId);
+        if (found) return found;
+      } catch (lookupErr) {
+        hadLookupError = true;
+        lastLookupError = lookupErr;
+      }
+      if (attempt < lookupAttempts && lookupDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, lookupDelayMs));
+    }
+    if (hadLookupError) {
+      throw new ProviderError("uncertain", "provider order lookup did not produce a fully definitive result", { cause: lastLookupError });
+    }
+    return null;
   }
 
   return {
@@ -79,6 +99,11 @@ function createProviderClient({ baseUrl, cert = "demo-partner-cert", timeoutMs =
       return request("GET", `/v1/cards/${encodeURIComponent(cardnbr)}/balance`);
     },
 
+    /** Repeatedly look up one idempotency key; any mixed lookup failure is uncertain. */
+    async reconcile(requestId) {
+      return reconcileLookups(requestId, (id) => this.lookup(id));
+    },
+
     /**
      * Order exactly once. If the provider goes quiet — timeout, dropped
      * socket — ask it about the request id instead of ordering again.
@@ -90,10 +115,15 @@ function createProviderClient({ baseUrl, cert = "demo-partner-cert", timeoutMs =
         const order = await this.order({ productCode, requestId });
         return { order, recovered: false };
       } catch (err) {
-        if (err.kind !== "timeout" && err.kind !== "network") throw err;
-        const found = await this.lookup(requestId);
+        const ambiguous = err.kind === "timeout" || err.kind === "network" || (err.kind === "http" && Number(err.status) >= 500);
+        if (!ambiguous) throw err;
+
+        const found = await this.reconcile(requestId);
         if (found) return { order: found, recovered: true, after: err.kind };
-        throw new ProviderError("unfulfilled", `provider ${err.kind}, and no order exists for this request id`, { after: err.kind });
+        // A negative lookup after an ambiguous POST is not a terminal failure:
+        // the provider may be eventually consistent. Only a contract-defined,
+        // explicit terminal response may authorize a refund.
+        throw new ProviderError("uncertain", `provider ${err.kind}, and no authoritative terminal result exists for this request id`, { after: err.kind });
       }
     },
   };
