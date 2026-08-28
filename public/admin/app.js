@@ -71,7 +71,7 @@
 
     $("swaps").querySelector("tbody").innerHTML = s.swaps.length
       ? s.swaps
-          .map((w) => `<tr><td>${w.swapId}</td><td><span class="badge ${w.status === "Settled" ? "green" : w.status === "Cancelled" ? "red" : "amber"}">${w.status}</span></td><td>${esc(w.brand)}</td><td>${w.cost}</td><td>${w.last4 ? `•••• ${w.last4}` : "—"}</td><td class="mono">${esc(w.orderRef ?? "—")}</td><td>${w.reveals}</td><td class="tiny">${w.recovered ? "recovered after ghost/timeout" : ""}${w.reason ? esc(w.reason) : ""}</td><td>${w.status === "Requested" ? `<button class="btn-danger btn-sm" data-cancel="${w.swapId}">reconcile</button>` : ""}</td></tr>`)
+          .map((w) => `<tr><td>${w.swapId}</td><td><span class="badge ${w.status === "Settled" ? "green" : w.status === "Cancelled" ? "red" : "amber"}">${w.status}</span></td><td>${esc(w.brand)}</td><td>${w.cost}</td><td>${w.last4 ? `•••• ${w.last4}` : "—"}</td><td class="mono">${esc(w.orderRef ?? "—")}</td><td>${w.reveals}</td><td class="tiny">${w.recovered ? "recovered after ghost/timeout" : ""}${w.reason ? esc(w.reason) : ""}</td><td>${w.status === "Requested" ? `<button class="btn-sm" data-cancel="${w.swapId}">reconcile</button> <button class="btn-danger btn-sm" data-refund="${w.swapId}">refund</button>` : ""}</td></tr>`)
           .join("")
       : `<tr><td colspan="9" class="muted">No swaps yet.</td></tr>`;
 
@@ -205,6 +205,20 @@
   $("swaps").addEventListener("click", guard(async (e) => {
     const b = e.target.closest("[data-cancel]");
     if (b && confirm(`Reconcile swap #${b.dataset.cancel}? It will settle a found order and keep an unknown result pending.`)) await api(`/api/admin/swaps/${b.dataset.cancel}/cancel`, "POST", { reason: "admin:console" });
+    const r = e.target.closest("[data-refund]");
+    // Deliberately a second button and a second sentence: reconcile asks the
+    // provider, refund asserts what the provider said. Only a person can do
+    // the second one, and the log records that they did.
+    if (
+      r &&
+      confirm(
+        `Refund swap #${r.dataset.refund}?\n\nOnly do this if the provider has confirmed that NO order exists for this request id. ` +
+          `The service checks once more and will deliver a card instead if it finds one — but this is your assertion, and it is logged.`
+      )
+    ) {
+      const out = await api(`/api/admin/swaps/${r.dataset.refund}/refund`, "POST", { confirmedNoOrder: true, reason: "admin:confirmed" });
+      if (out?.refundRefused) alert(`Not refunded — ${out.refundRefused}. The card was delivered to the learner instead.`);
+    }
   }));
 
   load();

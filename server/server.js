@@ -673,6 +673,29 @@ function createApp({
     }
   });
 
+  route("POST", /^\/api\/admin\/swaps\/(\d+)\/refund$/, async ({ req, params, body }) => {
+    requireRole(req, "admin");
+    // A refund is the one action that can pay twice, so it is never a side
+    // effect of a button that means something else. The operator has to state,
+    // in the request, that the provider confirmed no order exists.
+    if (body.confirmedNoOrder !== true) {
+      throw new HttpError(
+        422,
+        "confirmation_required",
+        "set confirmedNoOrder:true — only after the provider has confirmed that no order exists for this request id"
+      );
+    }
+    try {
+      return await swaps.forceRefund({ swapId: params[0], reason: String(body.reason ?? "admin:confirmed-no-order").slice(0, 32), actor: "admin" });
+    } catch (err) {
+      if (err instanceof LedgerError || err?.name === "InvalidSwap" || err?.name === "ProviderPending") {
+        const plain = plainError(err);
+        throw new HttpError(409, plain.code, plain.message);
+      }
+      throw err;
+    }
+  });
+
   route("POST", /^\/api\/admin\/stream-ticket$/, async ({ req }) => {
     requireRole(req, "admin");
     return { ticket: issueStreamTicket(), expiresInSeconds: STREAM_TICKET_TTL_MS / 1000 };

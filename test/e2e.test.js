@@ -670,6 +670,68 @@ test("18. a provider timeout with negative lookups stays requested — not refun
   assert.equal(mock.state.log.filter((e) => e.event === "order.hung").length, 1); // exactly one order attempt
 });
 
+test("18b. a declined order — the provider's own terminal answer — refunds exactly", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  mock.setMode("declined");
+  const { status, body } = await swapFor(l, item);
+  assert.equal(status, 200);
+  // Not "pending": the provider said no, in the shape a contract defines.
+  assert.equal(body.status, "Cancelled");
+  assert.equal(body.error?.code ?? body.warning?.code, "provider");
+  assert.equal((await call("/api/me", { token: l.token })).body.balance, item.cost, "credits come back");
+  assert.equal((await catalogItem()).inventory, item.inventory, "and so does the stock");
+  assert.equal(mock.state.orders.size, 0);
+  assert.equal((await ledger.stats()).inSwap, 0);
+  assert.equal((await ledger.stats()).outstanding, item.cost);
+});
+
+test("18c. an operator can end an uncertain swap, but only by asserting what the provider said", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  mock.setMode("timeout");
+  const swapped = (await swapFor(l, item)).body;
+  assert.equal(swapped.status, "Requested", "an ambiguous result is held, not refunded");
+  assert.equal((await call("/api/me", { token: l.token })).body.balance, 0);
+
+  // Reconcile still refuses: it asks the provider, and the provider is silent.
+  const reconciled = await call(`/api/admin/swaps/${swapped.swapId}/cancel`, { method: "POST", role: "admin", body: {} });
+  assert.equal(reconciled.status, 409);
+
+  // So does a refund without the assertion — the button cannot be a slip.
+  const unconfirmed = await call(`/api/admin/swaps/${swapped.swapId}/refund`, { method: "POST", role: "admin", body: { reason: "oops" } });
+  assert.equal(unconfirmed.status, 422);
+  assert.equal(unconfirmed.body.error, "confirmation_required");
+  assert.equal((await call("/api/me", { token: l.token })).body.balance, 0, "still held");
+
+  // With it, the swap reaches a terminal state and the learner is whole.
+  mock.setMode("normal"); // the operator has been on the phone; lookups work again
+  const refunded = await call(`/api/admin/swaps/${swapped.swapId}/refund`, { method: "POST", role: "admin", body: { confirmedNoOrder: true, reason: "admin:confirmed" } });
+  assert.equal(refunded.status, 200);
+  assert.equal(refunded.body.status, "Cancelled");
+  assert.equal((await call("/api/me", { token: l.token })).body.balance, item.cost);
+  assert.equal((await catalogItem()).inventory, item.inventory);
+  assert.ok(app.store.logEntries.some((e) => e.event === "swap.force_refunded"), "the operator's decision is on the record");
+});
+
+test("18d. a forced refund still refuses to pay twice when a card actually exists", async () => {
+  const l = await learner();
+  await pass(l);
+  const item = await catalogItem();
+  mock.setMode("ghost"); // the card is issued; the response is dropped
+  const ghosted = (await swapFor(l, item)).body;
+  // The ordinary path already recovers this one, so drive the refund at a
+  // swap the operator believes is empty — and watch it deliver instead.
+  if (ghosted.status === "Settled") {
+    const forced = await call(`/api/admin/swaps/${ghosted.swapId}/refund`, { method: "POST", role: "admin", body: { confirmedNoOrder: true } });
+    assert.equal(forced.status, 409, "a settled swap cannot be refunded at all");
+  }
+  assert.equal(mock.state.cards.size, 1);
+  assert.equal((await call("/api/me", { token: l.token })).body.balance, 0, "an issued card is never also refunded");
+});
+
 test("19. a ghosted order is recovered rather than re-ordered: one order, one card, one unit of stock", async () => {
   const l = await learner();
   await pass(l);

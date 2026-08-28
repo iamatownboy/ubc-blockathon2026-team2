@@ -197,6 +197,49 @@ function createSwapService({ ledger, store, provider }) {
     throw Object.assign(new Error("provider has not returned an authoritative terminal failure; the swap was not refunded"), { name: "ProviderPending" });
   }
 
+  /**
+   * The operator's terminal decision, and the only way a learner's credits
+   * come back when the provider never gave an authoritative answer.
+   *
+   * `cancel` above deliberately refuses to refund on an uncertain lookup —
+   * that is right, because a card may exist. But "we hold your credits until
+   * a machine is sure" is not a state a programme can leave a newcomer in. So
+   * a human may end it, and the API makes them say out loud that they checked:
+   * the request must carry confirmedNoOrder. It is a separate route and a
+   * separate button from reconcile for exactly that reason.
+   *
+   * Even then this looks one final time. An order that exists is delivered,
+   * never refunded — nobody gets both.
+   */
+  async function forceRefund({ swapId, reason = "admin:confirmed-no-order", actor = "admin" }) {
+    const record = store.swaps.get(Number(swapId));
+    if (!record) throw Object.assign(new Error(`no swap ${swapId}`), { name: "InvalidSwap" });
+    if (record.status === "Sealed") return settleDurable(record);
+    if (record.status !== "Requested") throw Object.assign(new Error(`cannot refund swap ${swapId} from ${record.status}`), { name: "InvalidSwap" });
+
+    let order = null;
+    try {
+      order = await provider.reconcile(record.requestHash);
+    } catch (err) {
+      // The lookup failing is why the operator is here. It does not block them.
+      log("swap.force_refund_lookup_failed", { swapId: record.swapId, kind: err?.kind ?? "uncertain" });
+    }
+    if (order) {
+      log("swap.force_refund_refused", { swapId: record.swapId, orderRef: order.orderRef });
+      return { ...(await sealAndSettle(record, order, { recovered: true, after: "force-refund-check" })), refundRefused: "an order exists for this request id; the card was delivered instead" };
+    }
+
+    const label = String(reason).slice(0, 32);
+    await ledger.cancelSwap("fulfiller", record.swapId, reasonBytes32(label));
+    record.status = "Cancelled";
+    record.reason = label;
+    record.refundedAt = new Date().toISOString();
+    record.refundedBy = actor;
+    store.swaps.put(record.swapId, record);
+    log("swap.force_refunded", { swapId: record.swapId, reason: label, by: actor });
+    return publicView(record);
+  }
+
   /** Reveal is counted and logged: a card revealed twenty times has left the app. */
   function reveal({ session, swapId }) {
     const record = store.swaps.get(Number(swapId));
@@ -216,7 +259,7 @@ function createSwapService({ ledger, store, provider }) {
       .map(publicView);
   }
 
-  return { swap, recoverPending, cancel, reveal, walletOf, plainError };
+  return { swap, recoverPending, cancel, forceRefund, reveal, walletOf, plainError };
 }
 
 /** What a client may see. The sealed blob is ciphertext; the server cannot open it. */

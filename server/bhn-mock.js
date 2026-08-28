@@ -31,7 +31,7 @@ const PRODUCTS = [
   { productCode: "VISA-CA-2500", brand: "Visa Prepaid", valueCad: 25, currency: "CAD", openLoop: true, network: "VISA" },
 ];
 
-const MODES = ["normal", "error", "timeout", "ghost", "httpghost"];
+const MODES = ["normal", "error", "timeout", "ghost", "httpghost", "declined"];
 
 function createMockProvider({ cert = "demo-partner-cert" } = {}) {
   const state = {
@@ -157,6 +157,13 @@ function createMockProvider({ cert = "demo-partner-cert" } = {}) {
       }
 
       const mode = consumeMode();
+      // The one failure a provider states as final: the issuer declined, no
+      // order was created, and asking again will keep saying so. This is the
+      // only shape that may authorise a refund — everything else is ambiguous.
+      if (mode === "declined") {
+        log("order.declined", { requestId, mode });
+        return json(res, 422, { error: "order_declined", message: "the issuer declined this order; no card was created", requestId, terminal: true });
+      }
       if (mode === "error") {
         log("order.failed", { requestId, mode });
         return json(res, 502, { error: "provider_unavailable", message: "upstream issuer unavailable" });

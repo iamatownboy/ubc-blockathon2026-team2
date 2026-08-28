@@ -153,7 +153,7 @@ is not only a URL change.
 ## Tests
 
 ```bash
-npm test                          # 28 ledger + 50 end-to-end + 2 UI smoke + 1 parity
+npm test                          # 28 ledger + 53 end-to-end + 2 UI smoke + 1 parity
 npm run test:parity               # the parity suite alone (needs a running chain)
 cd contracts && npx hardhat test  # 23 Solidity tests (needs the network once, for npm install)
 cd contracts && SOLC_JS=1 npx hardhat test   # same 23, offline: uses the solcjs in node_modules
@@ -289,6 +289,21 @@ provider may be eventually consistent. The swap stays Requested and keeps its
 credits and inventory reserved until an order is found or the real provider
 returns a contract-defined authoritative terminal failure; it is never both
 refunded and delivered.
+
+Then arm **declined** and swap again. That is the other half, and the one a
+learner actually feels: the issuer answers `422 order_declined`, no order was
+created, asking again keeps saying so — so the credits and the unit of stock
+come straight back. Two beats, one rule. *We refund when the provider tells us
+it failed. We hold when the provider tells us nothing.*
+
+Some swaps land in neither: the provider went quiet and never came back. A
+machine cannot end those safely, so a person does. The swaps table gives a
+Requested swap two buttons, and they mean different things — **reconcile**
+asks the provider again, while **refund** asserts what the provider said. The
+refund route refuses unless the request carries `confirmedNoOrder: true`, looks
+one final time before it acts, delivers the card instead if one turns up, and
+writes `swap.force_refunded` with the decision. Held credits are not a state to
+leave a newcomer in; ending it is a person's job, on the record.
 
 ## Why it can't become cash
 
