@@ -23,7 +23,8 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 16px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+/* 1rem, not 16px: a fixed pixel size ignores the reader's own browser text-size setting. */
+body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 1rem; line-height: 1.45; -webkit-font-smoothing: antialiased; }
 h1, h2, h3 { margin: 0 0 .35em; line-height: 1.2; letter-spacing: -.01em; }
 h1 { font-size: 1.5rem; } h2 { font-size: 1.15rem; } h3 { font-size: 1rem; }
 p { margin: 0 0 .75em; }
@@ -41,6 +42,10 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .btn-ghost { background: transparent; }
 .btn-danger { background: #fff; color: var(--accent); border-color: var(--accent); }
 .btn-sm { padding: .4rem .7rem; font-size: .85rem; border-radius: 9px; }
+.btn-block { min-height: 48px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
 .btn-block { width: 100%; }
 input, select, textarea {
   font: inherit; width: 100%; padding: .65rem .8rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink);

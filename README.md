@@ -1,5 +1,7 @@
 # LanguageToken — Blockathon for Social Good 2026
 
+[![tests](https://github.com/iamatownboy/ubc-blockathon2026-team2/actions/workflows/ci.yml/badge.svg)](https://github.com/iamatownboy/ubc-blockathon2026-team2/actions/workflows/ci.yml)
+
 > **Learn local. Earn local. Belong local.**
 
 Newcomers practise three-minute, real-world English missions and earn
@@ -64,6 +66,40 @@ only when `NODE_ENV` is not `production`; production with no code list refuses
 to start. `ENROLLMENT=open` disables the check and is an explicit, logged
 opt-out that reduces the cap to per-device — it is not a mode to demo in.
 
+A code is the only thing between a stranger and a gift card, so two things
+guard it. `npm run codes 200` prints codes with real entropy — 8 characters
+from a 32-letter alphabet with `O/0/I/1` removed, 40 bits, grouped so a
+volunteer can read one aloud. And wrong codes are counted: eight per address
+per ten minutes, then `429` with a `retry-after`, so guessing is not a loop.
+A correct code clears the count, so a learner who mistypes twice is not
+punished. Neither the address nor the attempted code is ever stored — the log
+records only how many tries have been used.
+
+The limiter is in-process. Behind several instances it needs a shared counter,
+and it trusts `X-Forwarded-For` only when `TRUST_PROXY=1` says a proxy sets it
+— otherwise anyone could reset their own counter with a header.
+
+### Who can use it
+
+The learner app is the whole product for someone who may be new to the
+language, the city, and the phone in their hand. So:
+
+* the document declares the language it is actually in, and changes it when
+  the learner does — without that, a screen reader announces 한국어 and 中文 in
+  an English voice;
+* status and errors are announced, not only coloured (`aria-live`, assertive
+  for errors);
+* changing screen moves focus, so the new screen is read out rather than
+  silently replacing the old one; re-rendering the same screen does not steal
+  focus from the control you are using;
+* text scales with the reader's own browser setting (`1rem`, never a fixed
+  pixel size), animation respects `prefers-reduced-motion`, and the bottom
+  navigation meets a 48px tap target;
+* the emoji are marked decorative, and the current tab is marked `aria-current`.
+
+Test 12c3 pins all of it. Right-to-left is wired (`dir` follows the language)
+but no RTL language is translated yet — that is a strings file, not a rewrite.
+
 ### Chain mode
 
 With no `LEDGER` set, the service runs on the contract when
@@ -107,7 +143,7 @@ change.
 ## Tests
 
 ```bash
-npm test                          # 28 ledger + 36 end-to-end + 1 parity, under 10 s, no toolchain
+npm test                          # 28 ledger + 41 end-to-end + 1 parity, under 10 s, no toolchain
 npm run test:parity               # the parity suite alone (needs a running chain)
 cd contracts && npx hardhat test  # 23 Solidity tests (needs the network once, for npm install)
 cd contracts && SOLC_JS=1 npx hardhat test   # same 23, offline: uses the solcjs in node_modules
@@ -142,7 +178,7 @@ submission would have stopped the verifier key awarding anything for the rest
 of an on-chain demo. Fixed, and the parity run now passes against a live
 Hardhat chain.
 
-**End to end, 36 tests.** A session refused without a partner-issued code and
+**End to end, 41 tests.** A session refused without a partner-issued code and
 a wiped browser landing back on the same handle, balance and lifetime cap; the
 code never appearing in the store; the coach filter stripping `pass` and `credits`; a
 tampered submission awarding nothing; grading and the review queue; the
@@ -170,10 +206,13 @@ server/
   catalog.js       closed-loop products; open-loop cannot be listed
   store.js         minimal off-chain state, review TTL, atomic sealed-swap persistence
   enrollment.js    partner-issued participation codes → one stable handle per person
+  ratelimit.js     a sliding window per address, so codes cannot be guessed in a loop
   ids.js           bytes32 helpers, random handles
 public/learner · public/admin · public/verifier · public/demo (the stage)
 test/ledger.test.js · test/e2e.test.js · test/parity.test.js
+scripts/make-codes.js                     high-entropy participation codes for a real desk
 make-submission.sh                        git archive → a clean source-only bundle
+.github/workflows/ci.yml                  every push runs both suites on Node 20 and 22
 (the earlier Next.js prototype in web/ is superseded and not committed)
 ```
 
@@ -247,6 +286,7 @@ Arm **error** or **timeout** instead and watch the refund land.
 - Passed and failed submissions retain structured audit results, not learner-written text. A near miss keeps its text for verifier review for at most 24 hours and deletes it immediately after a decision. Pattern checks reduce obvious PII, but free-text detection is not a guarantee.
 - The person-level cap is only as good as the partner's code hygiene: someone handed two codes is two learners to this service. Distribution controls (one code per person at the desk, codes voided when reissued) are a programme responsibility this build cannot enforce, and a funded pilot should add per-code issuance records on the partner side.
 - Cards are sealed to the device key that last used the code. Retyping the code on a new device restores the balance but not cards sealed to the old key — stated in the wallet screen, not hidden.
+- The rate limiter lives in one process's memory. It is the right shape and the wrong scale for more than one instance.
 - The `admin-demo` / `verifier-demo` tokens are published here and in the consoles, which flag themselves in red while either is in use. They are fine on a laptop and nowhere else; production refuses to start with them.
 - The working checkout carries roughly a gigabyte of dependencies and build output. None of it is tracked — `./make-submission.sh` exports the tracked source and lockfiles only (about 1.8 MB, 55 files) so a reviewer installs dependencies themselves.
 - No partnership with the City of Vancouver, any library, settlement organisation, brand or provider is claimed.

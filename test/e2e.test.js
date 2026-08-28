@@ -19,6 +19,8 @@ const catalog = require("../server/catalog");
 const { Store, assertNoPII, PIIRefusedError } = require("../server/store");
 const { hashParts } = require("../server/ids");
 const { createEnrollment } = require("../server/enrollment");
+const { createRateLimiter, clientKey } = require("../server/ratelimit");
+const { code: makeCode, ALPHABET } = require("../scripts/make-codes");
 
 let mock, app, base, ledger, providerBase, enrollment;
 let tempDirs;
@@ -179,6 +181,67 @@ test("1g. a production deployment cannot fall back to the demo code list", async
   assert.equal(open.required, false); // an explicit, documented opt-out
   const demo = createEnrollment({ secret: "s", production: false });
   assert.ok(demo.demoCodes.length > 0 && demo.required);
+});
+
+test("1h. guessing participation codes is throttled, and a correct one forgives the typos", async () => {
+  const keys = sealing.generateLearnerKeypair();
+  const guess = (c) => call("/api/session", { method: "POST", body: { publicKey: keys.publicJwk, enrollmentCode: c } });
+
+  // The service ships an eight-per-window limit; the suite must not depend on
+  // the exact number, only that guessing stops before the code space does.
+  const limit = app.codeAttempts.limit;
+  for (let i = 0; i < limit; i += 1) {
+    const r = await guess(`NOT-A-CODE-${i}`);
+    assert.equal(r.status, 403, `guess ${i + 1} should still be a plain refusal`);
+    assert.equal(r.body.error, "enrollment_invalid");
+  }
+  const blocked = await guess("NOT-A-CODE-again");
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.body.error, "too_many_attempts");
+  assert.ok(blocked.body.retryAfterSeconds > 0);
+  assert.ok(Number(blocked.headers.get("retry-after")) > 0);
+
+  // Even a *valid* code is refused while the address is cooling off — the
+  // limit is on the address, not on whether the guess happened to be right.
+  assert.equal((await guess(TEST_CODES[0])).status, 429);
+
+  // Nothing about the caller or the attempted codes reaches the store.
+  const dumped = JSON.stringify(app.store.dump());
+  assert.ok(!dumped.includes("NOT-A-CODE"), "attempted codes must never be stored");
+  assert.ok(!dumped.includes("127.0.0.1") && !dumped.includes("::1"), "the caller's address must never be stored");
+
+  // A correct code clears the count for that address.
+  app.codeAttempts.clear(clientKey({ socket: { remoteAddress: "127.0.0.1" }, headers: {} }));
+  app.codeAttempts.clear("::1");
+  app.codeAttempts.clear("::ffff:127.0.0.1");
+  const ok = await guess(TEST_CODES[1]);
+  assert.equal(ok.status, 200);
+  const after = await guess("NOT-A-CODE-later");
+  assert.equal(after.status, 403, "a success resets the window, so plain refusals resume");
+});
+
+test("1i. the limiter counts a window, not a lifetime, and never trusts a client header", () => {
+  let clock = 0;
+  const limiter = createRateLimiter({ limit: 2, windowMs: 1000, now: () => clock });
+  assert.equal(limiter.retryAfterMs("a"), 0);
+  limiter.record("a");
+  limiter.record("a");
+  assert.ok(limiter.retryAfterMs("a") > 0, "the third try waits");
+  assert.equal(limiter.retryAfterMs("b"), 0, "one address cannot lock out another");
+  clock = 1001;
+  assert.equal(limiter.retryAfterMs("a"), 0, "the window slides");
+
+  const req = { socket: { remoteAddress: "203.0.113.9" }, headers: { "x-forwarded-for": "1.2.3.4" } };
+  assert.equal(clientKey(req), "203.0.113.9", "a header must not be able to reset the counter");
+  assert.equal(clientKey(req, { trustProxy: true }), "1.2.3.4", "unless the operator says a proxy sets it");
+});
+
+test("1j. issued codes carry real entropy and no ambiguous characters", () => {
+  assert.equal(ALPHABET.length, 32);
+  for (const bad of ["O", "0", "I", "1"]) assert.ok(!ALPHABET.includes(bad), `${bad} is too easy to misread aloud`);
+  const codes = new Set(Array.from({ length: 500 }, () => makeCode()));
+  assert.equal(codes.size, 500, "500 generated codes must not collide");
+  for (const c of codes) assert.match(c, /^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/);
 });
 
 test("2. the store refuses to write a name, e-mail, phone, address or device id", async () => {
@@ -342,6 +405,38 @@ test("12a2. a closed-loop product the programme never approved syncs as unlisted
   assert.equal(res.status, 422);
   assert.equal(res.body.error, "unapproved_product");
   assert.equal((await call("/api/catalog")).body.items.find((i) => i.productCode === "PETROCAN-CA-2500"), undefined);
+});
+
+test("12c3. the learner app is usable without sight or a steady hand", async () => {
+  const get = async (p) => (await fetch(base + p)).text();
+  const [html, i18n, appjs, css] = await Promise.all([
+    get("/learner/"),
+    get("/learner/i18n.js"),
+    get("/learner/app.js"),
+    get("/common.css"),
+  ]);
+
+  // The document must declare the language it is actually in, or a screen
+  // reader announces 한국어 and 中文 with an English voice.
+  assert.match(i18n, /documentElement/);
+  assert.match(i18n, /el\.lang = current/);
+
+  // Status and errors have to be announced, not just coloured.
+  assert.match(html, /id="toast"[^>]*role="status"/);
+  assert.match(html, /id="toast"[^>]*aria-live/);
+  assert.match(appjs, /aria-live", kind === "red" \? "assertive"/);
+
+  // Replacing the page contents must move focus, or the new screen is silent.
+  assert.match(html, /<main id="app" tabindex="-1">/);
+  assert.match(appjs, /\$app\.focus\(/);
+  assert.match(appjs, /aria-current="page"/);
+  assert.match(appjs, /aria-hidden="true"/); // the emoji are decoration
+
+  // The reader's own text size and motion settings win.
+  assert.doesNotMatch(css, /body \{[^}]*font-size: 16px/);
+  assert.match(css, /font-size: 1rem/);
+  assert.match(css, /prefers-reduced-motion/);
+  assert.match(html, /min-height: 48px/); // tap targets on the bottom nav
 });
 
 test("12b. the admin cannot substitute a product code on an approved item", async () => {

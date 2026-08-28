@@ -32,6 +32,7 @@ const assessment = require("./assessment");
 const catalog = require("./catalog");
 const { handleForPublicKey, randomToken, asciiBytes32, isBytes32 } = require("./ids");
 const { createEnrollment } = require("./enrollment");
+const { createRateLimiter, clientKey } = require("./ratelimit");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 const MIME = {
@@ -72,6 +73,10 @@ function createApp({
   verifierToken = process.env.VERIFIER_TOKEN ?? "verifier-demo",
   identitySecret = process.env.IDENTITY_SECRET ?? "demo-identity-secret-change-me",
   enrollment,
+  // Eight wrong codes from one address per ten minutes. A learner who
+  // mistypes is nowhere near it; a script guessing codes is stopped at eight.
+  codeAttemptLimit = Number(process.env.CODE_ATTEMPT_LIMIT ?? 8),
+  codeAttemptWindowMs = Number(process.env.CODE_ATTEMPT_WINDOW_MS ?? 10 * 60 * 1000),
   publicDir = PUBLIC_DIR,
 } = {}) {
   if (!providerUrl) throw new Error("createApp needs providerUrl");
@@ -80,6 +85,7 @@ function createApp({
     if (adminToken === "admin-demo" || verifierToken === "verifier-demo") throw new Error("demo role tokens are refused in production");
   }
   const enrol = enrollment ?? createEnrollment({ secret: identitySecret });
+  const codeAttempts = createRateLimiter({ limit: codeAttemptLimit, windowMs: codeAttemptWindowMs });
   const provider = createProviderClient({ baseUrl: providerUrl, cert: providerCert, timeoutMs: providerTimeoutMs });
   const swaps = createSwapService({ ledger, store, provider });
   const streams = new Set();
@@ -225,7 +231,7 @@ function createApp({
 
   // ---- learner --------------------------------------------------------
 
-  route("POST", /^\/api\/session$/, async ({ body }) => {
+  route("POST", /^\/api\/session$/, async ({ req, body }) => {
     // Re-attach an existing session (the token lives in the learner's IndexedDB).
     if (typeof body.token === "string" && store.sessions.has(body.token)) {
       const s = store.sessions.get(body.token);
@@ -241,7 +247,20 @@ function createApp({
     if (enrol.required) {
       const code = typeof body.enrollmentCode === "string" ? body.enrollmentCode : "";
       if (!code.trim()) throw new HttpError(403, "enrollment_required", "a participation code from a partner desk is required");
-      if (!enrol.accepts(code)) throw new HttpError(403, "enrollment_invalid", "that participation code is not on the programme list");
+      // A code is short enough to guess in a loop, so wrong ones are counted.
+      const caller = clientKey(req);
+      const waitMs = codeAttempts.retryAfterMs(caller);
+      if (waitMs > 0) {
+        const retryAfterSeconds = Math.ceil(waitMs / 1000);
+        store.log("enrollment.throttled", { retryAfterSeconds }); // never the address, never the code
+        throw new HttpError(429, "too_many_attempts", "too many participation codes have been tried from here; wait and try again", { retryAfterSeconds });
+      }
+      if (!enrol.accepts(code)) {
+        const attempts = codeAttempts.record(caller);
+        store.log("enrollment.rejected", { attempts, of: codeAttempts.limit });
+        throw new HttpError(403, "enrollment_invalid", "that participation code is not on the programme list");
+      }
+      codeAttempts.clear(caller); // a correct code forgives earlier typos
       handle = enrol.handleFor(code);
     } else {
       handle = handleForPublicKey(publicKey, identitySecret);
@@ -663,7 +682,10 @@ function createApp({
       }
       json(res, 404, { error: "not_found", message: `no route for ${req.method} ${url.pathname}` });
     } catch (err) {
-      if (err instanceof HttpError) return json(res, err.status, { error: err.code, message: err.message, ...err.extra });
+      if (err instanceof HttpError) {
+        if (err.status === 429 && err.extra?.retryAfterSeconds) res.setHeader("retry-after", String(err.extra.retryAfterSeconds));
+        return json(res, err.status, { error: err.code, message: err.message, ...err.extra });
+      }
       if (err instanceof PIIRefusedError) return json(res, 422, { error: "pii_refused", message: err.message });
       if (err?.name === "OpenLoopProductError") return json(res, 422, { error: "open_loop_refused", message: err.message });
       if (err instanceof LedgerError) {
@@ -683,6 +705,7 @@ function createApp({
     swaps,
     seed,
     enrollment: enrol,
+    codeAttempts,
     tokens: { admin: adminToken, verifier: verifierToken },
     listen(port = 0, host = "127.0.0.1") {
       return new Promise((resolve, reject) => {

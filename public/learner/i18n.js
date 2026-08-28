@@ -76,6 +76,22 @@
     return s.replace(/\{(\w+)\}/g, (_, k) => (vars[k] ?? `{${k}}`));
   }
 
+  // Right-to-left scripts are not translated yet; the hook is here so adding
+  // one is a strings file, not a rewrite.
+  const RTL = new Set(["ar", "fa", "ur", "he"]);
+
+  /**
+   * Tell the document which language it is in. Without this a screen reader
+   * announces Korean and Chinese with an English voice — the app "supports"
+   * three languages and is unusable in two of them for a blind learner.
+   */
+  function applyDocumentLanguage() {
+    const el = document.documentElement;
+    if (!el) return;
+    el.lang = current;
+    el.dir = RTL.has(current) ? "rtl" : "ltr";
+  }
+
   function setLang(code) {
     if (!STRINGS[code]) return;
     current = code;
@@ -84,10 +100,13 @@
     } catch {
       /* ignore */
     }
+    applyDocumentLanguage();
   }
 
   /** Pick a translated field from a server object like { en, ko, zh }. */
   const pick = (obj) => (obj && typeof obj === "object" ? obj[current] ?? obj.en ?? "" : String(obj ?? ""));
 
-  window.LTi18n = { t, setLang, pick, LANGS, get lang() { return current; } };
+  applyDocumentLanguage(); // the saved or browser-detected language, before first paint
+
+  window.LTi18n = { t, setLang, pick, LANGS, applyDocumentLanguage, get lang() { return current; } };
 })();

@@ -13,8 +13,10 @@
   .top { display: flex; align-items: center; justify-content: space-between; padding: .9rem 1rem .4rem; }
   .top select { width: auto; padding: .3rem .5rem; font-size: .8rem; border-radius: 8px; }
   main { flex: 1; padding: .5rem 1rem 6rem; }
+  main:focus { outline: none; }
+  main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   nav.bottom { position: sticky; bottom: 0; display: grid; grid-template-columns: repeat(3, 1fr); background: var(--surface); border-top: 1px solid var(--line); padding: .35rem .5rem calc(.35rem + env(safe-area-inset-bottom)); }
-  nav.bottom button { border: 0; background: transparent; font-weight: 600; font-size: .78rem; color: var(--ink-3); display: flex; flex-direction: column; align-items: center; gap: .1rem; padding: .35rem 0; }
+  nav.bottom button { min-height: 48px; border: 0; background: transparent; font-weight: 600; font-size: .78rem; color: var(--ink-3); display: flex; flex-direction: column; align-items: center; gap: .1rem; padding: .35rem 0; }
   nav.bottom button .ic { font-size: 1.25rem; }
   nav.bottom button.active { color: var(--accent); }
   .balance { background: linear-gradient(135deg, #b8402f, #d9603f); color: #fff; border-radius: 18px; padding: 1rem 1.1rem; box-shadow: var(--shadow); }
@@ -65,9 +67,9 @@
     <div class="brand"><span class="leaf">🍁</span> LanguageToken <span id="ledger-badge" class="badge hidden"></span></div>
     <select id="lang" aria-label="Language"></select>
   </div>
-  <main id="app"><p class="muted" style="padding:2rem 0;text-align:center"><span class="spinner"></span></p></main>
+  <main id="app" tabindex="-1"><p class="muted" style="padding:2rem 0;text-align:center"><span class="spinner"></span></p></main>
   <nav class="bottom" id="nav"></nav>
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 </div>
 <script src="/learner/i18n.js"></script>
 <script src="/learner/crypto.js"></script>

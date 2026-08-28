@@ -69,6 +69,9 @@
   // ---------------------------------------------------------------- ui bits
 
   function toast(msg, kind = "red") {
+    // A toast that only changes colour is invisible to a screen reader. Errors
+    // interrupt; everything else waits for a pause.
+    $toast.setAttribute("aria-live", kind === "red" ? "assertive" : "polite");
     $toast.className = `toast notice ${kind}`;
     $toast.textContent = msg;
     clearTimeout(toast.timer);
@@ -93,7 +96,14 @@
       ["shop", "🎁", t("nav_shop")],
       ["wallet", "👛", t("nav_wallet")],
     ];
-    $nav.innerHTML = tabs.map(([id, ic, label]) => `<button data-go="${id}" class="${state.screen === id || (id === "home" && state.screen.startsWith("mission")) ? "active" : ""}"><span class="ic">${ic}</span>${esc(label)}</button>`).join("");
+    $nav.innerHTML = tabs
+      .map(([id, ic, label]) => {
+        const active = state.screen === id || (id === "home" && state.screen.startsWith("mission"));
+        // aria-current tells a screen reader which tab you are on; the icon is
+        // decoration and would otherwise be read out as a word.
+        return `<button data-go="${id}" class="${active ? "active" : ""}"${active ? ' aria-current="page"' : ""}><span class="ic" aria-hidden="true">${ic}</span>${esc(label)}</button>`;
+      })
+      .join("");
   }
 
   function balanceCard() {
@@ -189,11 +199,14 @@
     return `<h2>${esc(t("wallet_title"))}</h2><p class="tiny">${esc(t("wallet_sub"))}</p>${cards}<p class="tiny" style="margin-top:1rem">${esc(t("wallet_warning"))}</p>`;
   }
 
+  let lastScreen = null;
+
   function render() {
     if (state.screen === "enrol") {
       $nav.innerHTML = "";
       $app.innerHTML = renderEnrol();
       renderLedgerBadge();
+      lastScreen = "enrol";
       document.getElementById("enrol-code")?.focus();
       return;
     }
@@ -201,6 +214,13 @@
     const screens = { home: renderHome, mission: renderMissionIntro, "mission-practise": renderPractise, "mission-coach": renderCoach, "mission-check": renderCheck, "mission-result": renderResult, shop: renderShop, wallet: renderWallet };
     $app.innerHTML = (screens[state.screen] ?? renderHome)();
     renderLedgerBadge();
+    // Replacing the page contents is invisible to a screen reader unless focus
+    // follows. Only on an actual screen change — re-rendering the same screen
+    // (a radio button, a spinner) must not yank focus out of the control.
+    if (state.screen !== lastScreen) {
+      lastScreen = state.screen;
+      $app.focus({ preventScroll: true });
+    }
     window.scrollTo(0, 0);
   }
 
